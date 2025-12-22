@@ -31,6 +31,25 @@ default_envs = {
 }
 
 
+def _get_ray_temp_dir() -> str | None:
+    """Return a desired Ray temp dir if configured via env vars.
+
+    Ray's canonical env var is RAY_TMPDIR (no underscore). We also accept the
+    legacy/local convention RAY_TMP_DIR for convenience.
+    """
+    return os.environ.get("RAY_TMPDIR") or os.environ.get("RAY_TMP_DIR")
+
+
+def _maybe_append_ray_temp_dir(cmd: str) -> str:
+    """Append `--temp-dir` to a `ray start ...` command if configured."""
+    ray_tmpdir = _get_ray_temp_dir()
+    if not ray_tmpdir:
+        return cmd
+    os.makedirs(ray_tmpdir, exist_ok=True)
+    # Quote to survive spaces.
+    return f'{cmd} --temp-dir="{ray_tmpdir}"'
+
+
 def start_ray_cluster():
     rank = get_driver_rank()
     world_size = get_driver_world_size()
@@ -49,6 +68,8 @@ def start_ray_cluster():
         time.sleep(5)
         cmd = f"ray start --address={master_addr}:{master_port} --node-name={node_name}"
 
+    cmd = _maybe_append_ray_temp_dir(cmd)
+
     logger.info(f"Starting ray cluster: {cmd}")
     ret = subprocess.run(cmd, shell=True, capture_output=True)
     if ret.returncode != 0:
@@ -66,8 +87,12 @@ def init():
     master_port = get_driver_master_port()
 
     manual_start = start_ray_cluster()
+    ray_tmpdir = _get_ray_temp_dir()
     runtime_env = {
-        "env_vars": default_envs
+        "env_vars": {
+            **default_envs,
+            **({"RAY_TMPDIR": ray_tmpdir, "TMPDIR": ray_tmpdir} if ray_tmpdir else {}),
+        }
     }
 
     if not ray.is_initialized():

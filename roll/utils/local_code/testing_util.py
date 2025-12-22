@@ -20,7 +20,30 @@ from io import StringIO
 from unittest.mock import mock_open, patch
 
 import numpy as np
-from pyext import RuntimeModule
+import types
+
+
+class RuntimeModule:
+    """Replacement for pyext.RuntimeModule (incompatible with Python 3.11+).
+    
+    Provides the same interface as pyext.RuntimeModule for dynamically
+    creating and executing Python code from strings.
+    """
+    @staticmethod
+    def from_string(name, path, code):
+        """Create a module from a code string.
+        
+        Args:
+            name: Module name
+            path: Unused (kept for compatibility)
+            code: Python code as string
+            
+        Returns:
+            A module object with the executed code
+        """
+        module = types.ModuleType(name)
+        exec(code, module.__dict__)
+        return module
 
 
 def truncatefn(s, length=300):

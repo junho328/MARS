@@ -17,7 +17,6 @@ isort
 jsonlines
 deprecated
 trl==0.9.6
-pyext
 dacite
 codetiming
 more_itertools
