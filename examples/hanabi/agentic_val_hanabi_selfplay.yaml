@@ -22,20 +22,16 @@ output_dir: /ext_hdd/jhna/mars/exps/${exp_name}/output
 system_envs:
   USE_MODELSCOPE: "1"
 
-#track_with: wandb
-#tracker_kwargs:
-#  api_key:
-#  project: roll-agentic
-#  name: ${exp_name}_sokoban
-#  notes: "agentic_pipeline"
-#  tags:
-#    - agentic
-#    - roll
-#    - baseline
-
-track_with: tensorboard
+track_with: wandb
 tracker_kwargs:
-  log_dir: /ext_hdd/jhna/mars/exps/${exp_name}/output/tensorboard_logs
+ project: mars-hanabi-train
+ name: hanabi_train_${exp_name}
+ notes: "Hanabi self-play train"
+ dir: /ext_hdd/jhna
+
+# track_with: tensorboard
+# tracker_kwargs:
+#   log_dir: /ext_hdd/jhna/mars/exps/${exp_name}/output/tensorboard_logs
 
 lora_target: o_proj,q_proj,k_proj,v_proj
 lora_rank: 32
