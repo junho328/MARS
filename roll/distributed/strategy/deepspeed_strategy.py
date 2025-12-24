@@ -214,7 +214,16 @@ class DeepSpeedTrainStrategy(DeepSpeedInferStrategy, TrainStrategy):
         self.tokenizer = default_tokenizer_provider(model_args=self.worker_config.model_args)
         self.processor = default_processor_provider(model_args=self.worker_config.model_args)
 
-        model = model_provider(tokenizer=self.tokenizer, model_args=self.worker_config.model_args, is_trainable=True)
+        # Handle multi-adapter model provider return
+        model_result = model_provider(tokenizer=self.tokenizer, model_args=self.worker_config.model_args, is_trainable=True)
+        
+        # Check if model_provider returned (model, adapter_manager) tuple
+        self.adapter_manager = None
+        if isinstance(model_result, tuple):
+            model, self.adapter_manager = model_result
+            logger.info(f"Multi-adapter model loaded with {self.adapter_manager.num_agents} agents")
+        else:
+            model = model_result
 
         adam_optimizer = DeepSpeedCPUAdam if self.ds_config.is_offload() else FusedAdam
         optim_params = get_optimizer_grouped_parameters(

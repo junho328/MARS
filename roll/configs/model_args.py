@@ -1,5 +1,5 @@
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import torch
 
@@ -15,6 +15,36 @@ class ModelArguments:
         metadata={
             "help": "Path to the model weight or identifier from huggingface.co/models or modelscope.cn/models."
         },
+    )
+    
+    # Multi-agent LoRA adapter settings
+    multi_adapter_mode: bool = field(
+        default=False,
+        metadata={"help": "Enable per-agent LoRA adapters for multi-agent training."},
+    )
+    num_agents: int = field(
+        default=2,
+        metadata={"help": "Number of agents, each gets a dedicated LoRA adapter."},
+    )
+    lora_target: Optional[str] = field(
+        default=None,
+        metadata={"help": "Comma-separated target modules for LoRA (e.g., 'q_proj,k_proj,v_proj,o_proj')."},
+    )
+    lora_rank: int = field(
+        default=32,
+        metadata={"help": "LoRA rank (r parameter)."},
+    )
+    lora_alpha: float = field(
+        default=32.0,
+        metadata={"help": "LoRA alpha scaling parameter."},
+    )
+    lora_dropout: float = field(
+        default=0.0,
+        metadata={"help": "LoRA dropout probability."},
+    )
+    freeze_base_model: bool = field(
+        default=True,
+        metadata={"help": "Freeze base model weights when using LoRA adapters."},
     )
     attn_implementation: Optional[str] = field(
         default=None,

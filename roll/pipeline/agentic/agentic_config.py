@@ -94,6 +94,20 @@ class AgenticConfig(BaseConfig):
         metadata={"help": "Special tokens."},
     )
     max_steps_per_traj: int = field(default=10, metadata={"help": "Max steps per trajectory."})
+    
+    # Multi-agent adapter settings
+    multi_adapter_mode: bool = field(
+        default=False,
+        metadata={"help": "Enable per-agent LoRA adapters. Each agent gets a dedicated adapter."},
+    )
+    num_agents: int = field(
+        default=2,
+        metadata={"help": "Number of agents in multi-agent setting. Each gets a LoRA adapter."},
+    )
+    adapter_sync_frequency: int = field(
+        default=1,
+        metadata={"help": "Frequency of adapter weight synchronization to inference workers."},
+    )
 
     # role related
     pretrain: str = field(
@@ -222,6 +236,14 @@ class AgenticConfig(BaseConfig):
         self.critic.name = "critic"
         self.train_env_manager.name = "train_env"
         self.val_env_manager.name = "val_env"
+        
+        # Propagate multi-adapter settings to model args
+        if self.multi_adapter_mode:
+            self.actor_train.model_args.multi_adapter_mode = True
+            self.actor_train.model_args.num_agents = self.num_agents
+            self.actor_infer.model_args.multi_adapter_mode = True
+            self.actor_infer.model_args.num_agents = self.num_agents
+            logger.info(f"Multi-adapter mode enabled with {self.num_agents} agents")
 
         if self.render_save_dir:
             self.render_save_dir = os.environ.get("ROLL_RENDER_DIR", self.render_save_dir)

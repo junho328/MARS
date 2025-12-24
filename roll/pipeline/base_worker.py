@@ -1,8 +1,9 @@
 import os
 import threading
 import time
-from typing import Union, Optional, Dict
+from typing import Union, Optional, Dict, List
 
+import numpy as np
 import ray
 import torch
 from codetiming import Timer
@@ -38,6 +39,9 @@ class ActorWorker(Worker):
         self.server_metrics = {}
         self.thread_server = None
         self.offload_manager = None
+        # Multi-adapter support
+        self.adapter_manager = None
+        self.multi_adapter_mode = False
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def initialize(self, pipeline_config):
@@ -47,6 +51,13 @@ class ActorWorker(Worker):
 
         self.strategy.initialize(model_provider=default_actor_model_provider)
         self.tokenizer = self.strategy.tokenizer
+        
+        # Check if multi-adapter mode is enabled and store adapter_manager
+        if hasattr(self.strategy, 'adapter_manager') and self.strategy.adapter_manager is not None:
+            self.adapter_manager = self.strategy.adapter_manager
+            self.multi_adapter_mode = True
+            self.logger.info(f"Multi-adapter mode enabled with {self.adapter_manager.num_agents} agents")
+        
         if self.pipeline_config.resume_from_checkpoint:
             load_dir = self.pipeline_config.resume_from_checkpoint
             self.strategy.load_checkpoint(load_dir=load_dir, tag="checkpoint")
@@ -64,6 +75,9 @@ class ActorWorker(Worker):
     def train_step(self, data: DataProto):
         """
         return DataProto(meta_info={'metrics': metrics})
+        
+        For multi-adapter mode, this method groups data by agent_id and trains
+        each adapter separately to ensure gradient isolation.
         """
         global_step = data.meta_info.get("global_step", 0)
         is_offload_states = data.meta_info.get("is_offload_states", True)
@@ -84,25 +98,98 @@ class ActorWorker(Worker):
                 per_device_train_batch_size * self.worker_config.training_args.gradient_accumulation_steps
             )
 
-            dataloader = data.make_iterator(
-                mini_batch_size=backward_batch_size,
-                epochs=self.pipeline_config.ppo_epochs,
-                dataloader_kwargs={"shuffle": True},
-            )
+            if self.multi_adapter_mode:
+                # Multi-adapter training: group by agent_id and train each adapter separately
+                metrics = self._train_step_multi_adapter(
+                    data=data,
+                    backward_batch_size=backward_batch_size,
+                    global_step=global_step,
+                    metrics=metrics,
+                )
+            else:
+                # Standard single-adapter training
+                dataloader = data.make_iterator(
+                    mini_batch_size=backward_batch_size,
+                    epochs=self.pipeline_config.ppo_epochs,
+                    dataloader_kwargs={"shuffle": True},
+                )
 
-            for batch_idx, data in tqdm(
-                enumerate(dataloader),
-                desc=f"{self.worker_name} train global step {global_step}",
-                total=data.batch.batch_size[0] * self.pipeline_config.ppo_epochs // backward_batch_size,
-            ):
-                pg_metrics = self.strategy.train_step(batch=data, loss_func=self.loss_func)
-                append_to_dict(metrics, pg_metrics)
+                for batch_idx, batch_data in tqdm(
+                    enumerate(dataloader),
+                    desc=f"{self.worker_name} train global step {global_step}",
+                    total=data.batch.batch_size[0] * self.pipeline_config.ppo_epochs // backward_batch_size,
+                ):
+                    pg_metrics = self.strategy.train_step(batch=batch_data, loss_func=self.loss_func)
+                    append_to_dict(metrics, pg_metrics)
 
             metrics["actor/lr"] = self.strategy.scheduler.get_last_lr()[0]
             data.to("cpu")
 
         output = DataProto(meta_info={"metrics": metrics})
         return output
+    
+    def _train_step_multi_adapter(self, data: DataProto, backward_batch_size: int, global_step: int, metrics: Dict):
+        """
+        Train step for multi-adapter mode.
+        
+        Groups data by agent_id and trains each adapter separately.
+        This ensures gradient isolation - each adapter only receives
+        gradients from its own agent's data.
+        """
+        # Get agent_ids from data
+        if "agent_ids" not in data.non_tensor_batch:
+            self.logger.warning("agent_ids not found in data, falling back to single adapter training")
+            # Fallback: train with first adapter
+            self.adapter_manager.activate_adapter(0, enable_gradient=True)
+            dataloader = data.make_iterator(
+                mini_batch_size=backward_batch_size,
+                epochs=self.pipeline_config.ppo_epochs,
+                dataloader_kwargs={"shuffle": True},
+            )
+            for batch_idx, batch_data in enumerate(dataloader):
+                pg_metrics = self.strategy.train_step(batch=batch_data, loss_func=self.loss_func)
+                append_to_dict(metrics, pg_metrics)
+            return metrics
+        
+        agent_ids = data.non_tensor_batch["agent_ids"]
+        unique_agents = set(agent_ids.flatten().tolist())
+        
+        self.logger.info(f"Multi-adapter training with agents: {unique_agents}")
+        
+        for agent_id in sorted(unique_agents):
+            # Filter data for this agent
+            agent_mask = (agent_ids == agent_id).flatten()
+            if not agent_mask.any():
+                continue
+            
+            # Create agent-specific data subset
+            agent_data = data.select(indices=torch.where(agent_mask)[0])
+            
+            if agent_data.batch.batch_size[0] == 0:
+                continue
+            
+            # Activate this agent's adapter (enables gradients only for this adapter)
+            self.adapter_manager.activate_adapter(int(agent_id), enable_gradient=True)
+            self.logger.debug(f"Training adapter for agent {agent_id} with {agent_data.batch.batch_size[0]} samples")
+            
+            # Create dataloader for this agent's data
+            dataloader = agent_data.make_iterator(
+                mini_batch_size=min(backward_batch_size, agent_data.batch.batch_size[0]),
+                epochs=self.pipeline_config.ppo_epochs,
+                dataloader_kwargs={"shuffle": True},
+            )
+            
+            for batch_idx, batch_data in tqdm(
+                enumerate(dataloader),
+                desc=f"{self.worker_name} train agent {agent_id} step {global_step}",
+                total=max(1, agent_data.batch.batch_size[0] * self.pipeline_config.ppo_epochs // backward_batch_size),
+            ):
+                pg_metrics = self.strategy.train_step(batch=batch_data, loss_func=self.loss_func)
+                # Prefix metrics with agent_id for tracking
+                agent_metrics = {f"agent_{agent_id}/{k}": v for k, v in pg_metrics.items()}
+                append_to_dict(metrics, agent_metrics)
+        
+        return metrics
 
     @register(dispatch_mode=Dispatch.DP_MP_COMPUTE)
     @torch.no_grad()
@@ -207,6 +294,9 @@ class ActorWorker(Worker):
     def compute_log_probs(self, data: DataProto):
         """
         return DataProto.from_dict(tensors={'log_probs': output})
+        
+        For multi-adapter mode, computes log probs for each agent using
+        the corresponding adapter.
         """
         data = self.strategy.get_data_input(data)
         global_step = data.meta_info.get("global_step", 0)
@@ -221,10 +311,17 @@ class ActorWorker(Worker):
         ):
             data = data.to("cuda")
             data.meta_info["micro_batch_size"] = self.worker_config.infer_batch_size
-            with torch.no_grad():
-                results: Dict[str, torch.Tensor] = self.strategy.forward_step(
-                    batch=data, forward_func=self.forward_func_log_probs
-                )
+            
+            if self.multi_adapter_mode and "agent_ids" in data.non_tensor_batch:
+                # Multi-adapter mode: compute log probs per agent
+                results = self._compute_log_probs_multi_adapter(data)
+            else:
+                # Standard single-adapter mode
+                with torch.no_grad():
+                    results: Dict[str, torch.Tensor] = self.strategy.forward_step(
+                        batch=data, forward_func=self.forward_func_log_probs
+                    )
+            
             if results is None:
                 return DataProto(batch=None, meta_info={"metrics": metrics})
             output = DataProto.from_dict(tensors={"log_probs": results["log_probs"], "entropy": results["entropy"]})
@@ -232,6 +329,50 @@ class ActorWorker(Worker):
             data.to("cpu")
         output.meta_info = {"metrics": metrics}
         return output
+    
+    def _compute_log_probs_multi_adapter(self, data: DataProto) -> Dict[str, torch.Tensor]:
+        """
+        Compute log probs for multi-adapter mode.
+        
+        Processes each agent's data with the corresponding adapter to ensure
+        log probs are computed with the correct adapter weights.
+        """
+        agent_ids = data.non_tensor_batch["agent_ids"]
+        batch_size = data.batch.batch_size[0]
+        seq_len = data.batch["input_ids"].shape[1]
+        
+        # Initialize output tensors
+        all_log_probs = torch.zeros(batch_size, seq_len - 1, device=data.batch["input_ids"].device)
+        all_entropy = torch.zeros(batch_size, seq_len - 1, device=data.batch["input_ids"].device)
+        
+        unique_agents = set(agent_ids.flatten().tolist())
+        
+        for agent_id in sorted(unique_agents):
+            # Filter data for this agent
+            agent_mask = (agent_ids == agent_id).flatten()
+            agent_indices = torch.where(torch.tensor(agent_mask))[0]
+            
+            if len(agent_indices) == 0:
+                continue
+            
+            # Create agent-specific data subset
+            agent_data = data.select(indices=agent_indices)
+            
+            # Activate this agent's adapter (no gradient needed for inference)
+            self.adapter_manager.activate_adapter(int(agent_id), enable_gradient=False)
+            
+            with torch.no_grad():
+                results = self.strategy.forward_step(
+                    batch=agent_data, forward_func=self.forward_func_log_probs
+                )
+            
+            if results is not None:
+                # Place results back in the correct positions
+                for i, idx in enumerate(agent_indices):
+                    all_log_probs[idx] = results["log_probs"][i]
+                    all_entropy[idx] = results["entropy"][i]
+        
+        return {"log_probs": all_log_probs, "entropy": all_entropy}
 
     def forward_func_log_probs(self, data: DataProto, output_tensor: torch.Tensor):
         """

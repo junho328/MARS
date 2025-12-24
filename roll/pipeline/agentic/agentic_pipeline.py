@@ -187,6 +187,11 @@ class AgenticPipeline(BasePipeline):
                 metrics["time/rollout"] = rollout_timer.last
                 metrics.update(reduce_metrics(batch.meta_info.pop("metrics", {})))
                 batch.meta_info["global_step"] = global_step
+                
+                # Extract agent_ids for multi-adapter training
+                if self.pipeline_config.multi_adapter_mode:
+                    batch = self._extract_agent_ids(batch)
+                    logger.info(f"Multi-adapter mode: extracted agent_ids for {self.pipeline_config.num_agents} agents")
 
                 with Timer(name="cal_ref_log_probs", logger=None) as cal_timer:
                     ref_log_probs_refs: List[ray.ObjectRef] = self.reference.compute_log_probs(batch, blocking=False)
@@ -371,6 +376,44 @@ class AgenticPipeline(BasePipeline):
             global_step += 1
             logger.info(f"epoch {global_step} finished")
         logger.info("pipeline complete!")
+    
+    def _extract_agent_ids(self, batch: DataProto) -> DataProto:
+        """
+        Extract agent_ids from rollout data for multi-adapter training.
+        
+        In self-play mode, group_ids contain player information like 'group_id_p0' or 'group_id_p1'.
+        This method extracts the player ID and adds it as agent_ids to the batch.
+        """
+        import numpy as np
+        import re
+        
+        group_ids = batch.non_tensor_batch.get("group_ids", None)
+        if group_ids is None:
+            # Fallback: assign all to agent 0
+            agent_ids = np.zeros(batch.batch.batch_size[0], dtype=np.int64)
+            batch.non_tensor_batch["agent_ids"] = agent_ids
+            return batch
+        
+        agent_ids = []
+        for group_id in group_ids.flatten():
+            group_id_str = str(group_id)
+            # Look for player suffix like '_p0' or '_p1'
+            match = re.search(r'_p(\d+)$', group_id_str)
+            if match:
+                agent_id = int(match.group(1))
+            else:
+                # Default to agent 0 if no player suffix found
+                agent_id = 0
+            agent_ids.append(agent_id)
+        
+        batch.non_tensor_batch["agent_ids"] = np.array(agent_ids, dtype=np.int64)
+        
+        # Log agent distribution
+        unique, counts = np.unique(batch.non_tensor_batch["agent_ids"], return_counts=True)
+        agent_dist = dict(zip(unique, counts))
+        logger.info(f"Agent ID distribution: {agent_dist}")
+        
+        return batch
 
 
 def compute_data_metrics(batch):

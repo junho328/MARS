@@ -592,6 +592,8 @@ class EnvManager:
                 "messages_list": np.array(messages_list, dtype=object),
                 "tags": np.array([self.rollout_cache["tag"]], dtype=object),
                 "frames": np.array([self.rollout_cache["frames"]], dtype=object),
+                # Add agent_id directly for multi-adapter training
+                "agent_ids": np.array([player_id if player_id is not None else 0], dtype=np.int64),
             }
         )
         # pad to response length

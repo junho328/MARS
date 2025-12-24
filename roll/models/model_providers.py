@@ -1,5 +1,5 @@
 import os
-from typing import Optional, List
+from typing import Optional, List, Tuple, Union
 
 import torch
 from transformers import (
@@ -29,6 +29,47 @@ from roll.utils.logging import get_logger
 
 
 logger = get_logger()
+
+
+def apply_multi_adapter(model, model_args: "ModelArguments"):
+    """
+    Apply multi-adapter LoRA to a model for multi-agent training.
+    
+    Each agent gets a dedicated LoRA adapter. The base model weights are frozen
+    and only the adapters are trainable.
+    
+    Args:
+        model: The base pretrained model
+        model_args: Model arguments containing LoRA configuration
+    
+    Returns:
+        Tuple of (model_with_adapters, MultiAdapterManager)
+    """
+    from roll.models.multi_adapter_manager import create_multi_adapter_model
+    
+    if not model_args.multi_adapter_mode:
+        return model, None
+    
+    if model_args.lora_target is None:
+        model_args.lora_target = "q_proj,k_proj,v_proj,o_proj"
+        logger.info(f"lora_target not specified, using default: {model_args.lora_target}")
+    
+    adapter_manager = create_multi_adapter_model(
+        model=model,
+        num_agents=model_args.num_agents,
+        lora_target=model_args.lora_target,
+        lora_rank=model_args.lora_rank,
+        lora_alpha=model_args.lora_alpha,
+        lora_dropout=model_args.lora_dropout,
+        freeze_base_model=model_args.freeze_base_model,
+    )
+    
+    logger.info(
+        f"Created multi-adapter model with {model_args.num_agents} agents, "
+        f"rank={model_args.lora_rank}, alpha={model_args.lora_alpha}"
+    )
+    
+    return adapter_manager.model, adapter_manager
 
 
 def default_tokenizer_provider(model_args: "ModelArguments"):
@@ -326,6 +367,8 @@ def default_actor_model_provider(
     config = AutoConfig.from_pretrained(model_args.model_name_or_path)
     old_model_name_or_path = model_args.model_name_or_path
     model_args.model_name_or_path = download_model(model_args.model_name_or_path)
+    adapter_manager = None
+    
     if (
         mca_TrainingArguments is not None
         and training_args is not None
@@ -364,8 +407,17 @@ def default_actor_model_provider(
         if model.config.pad_token_id is None:
             model.config.pad_token_id = tokenizer.pad_token_id
         patch_model(model, config, use_mcore=False)
+        
+        # Apply multi-adapter for multi-agent training
+        if model_args.multi_adapter_mode and is_trainable:
+            model, adapter_manager = apply_multi_adapter(model, model_args)
+            logger.info(f"Multi-adapter model created with {model_args.num_agents} adapters")
 
     model_args.model_name_or_path = old_model_name_or_path
+    
+    # Return adapter_manager alongside model if multi-adapter mode is enabled
+    if adapter_manager is not None:
+        return model, adapter_manager
     return model
 
 
