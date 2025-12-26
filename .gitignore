@@ -167,3 +167,9 @@ cython_debug/
 log
 # examples
 runs/
+
+# Weights & Biases
+wandb/
+
+# Training outputs
+output/

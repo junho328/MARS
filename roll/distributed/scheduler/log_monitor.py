@@ -180,6 +180,86 @@ class ExceptionMonitor:
         return self.stop_count
 
 
+class LogMonitorCompat:
+    """
+    Compatibility wrapper for LogMonitor that works with Ray 2.53+.
+    
+    In newer Ray versions, LogMonitor requires a gcs_client instead of gcs_publisher.
+    This class wraps the new interface while maintaining the old behavior using
+    a custom publisher for log output.
+    """
+    
+    def __init__(self, node_ip_address, logs_dir, publisher, is_proc_alive_fn):
+        self.node_ip_address = node_ip_address
+        self.logs_dir = logs_dir
+        self.publisher = publisher
+        self.is_proc_alive_fn = is_proc_alive_fn
+        self.running = True
+        self.log_filenames = set()
+        self.closed_file_infos = []
+        self.open_file_infos = []
+        
+    def run(self):
+        """Main monitoring loop - simplified version that works without gcs_client."""
+        import time
+        while self.running:
+            try:
+                self.update_log_filenames()
+                self.check_log_files_and_publish_updates()
+            except Exception as e:
+                logger.debug(f"LogMonitorCompat error: {e}")
+            time.sleep(0.1)
+    
+    def update_log_filenames(self):
+        """Update the list of log files to monitor."""
+        monitor_log_paths = []
+        monitor_log_paths += glob.glob(f"{self.logs_dir}/worker*[.out|.err]")
+        monitor_log_paths += glob.glob(f"{self.logs_dir}/raylet*.err")
+        
+        for file_path in monitor_log_paths:
+            if os.path.isfile(file_path) and file_path not in self.log_filenames:
+                worker_match = WORKER_LOG_PATTERN.match(file_path)
+                worker_pid = int(worker_match.group(2)) if worker_match else None
+                is_err_file = file_path.endswith("err")
+                
+                self.log_filenames.add(file_path)
+                self.closed_file_infos.append(
+                    LogFileInfo(
+                        filename=file_path,
+                        size_when_last_opened=0,
+                        file_position=0,
+                        file_handle=None,
+                        is_err_file=is_err_file,
+                        job_id=None,
+                        worker_pid=worker_pid,
+                    )
+                )
+    
+    def check_log_files_and_publish_updates(self):
+        """Check for new log content and publish."""
+        for file_info in list(self.closed_file_infos):
+            try:
+                current_size = os.path.getsize(file_info.filename)
+                if current_size > file_info.file_position:
+                    with open(file_info.filename, 'r') as f:
+                        f.seek(file_info.file_position)
+                        new_lines = f.read()
+                        if new_lines:
+                            self.publisher.publish_logs({
+                                'lines': new_lines.split('\n'),
+                                'ip': self.node_ip_address,
+                                'pid': str(file_info.worker_pid or 'unknown'),
+                                'is_err': file_info.is_err_file,
+                            })
+                        file_info.file_position = f.tell()
+            except Exception:
+                pass
+    
+    def stop(self):
+        """Stop the monitor."""
+        self.running = False
+
+
 class LogMonitorListener:
 
     def __init__(self):
@@ -188,12 +268,26 @@ class LogMonitorListener:
         self.node_ip_address = ray.util.get_node_ip_address()
         self.rank = get_driver_rank()
         self.world_size = get_driver_world_size()
-        self.log_monitor = LogMonitor(
-            node_ip_address=self.node_ip_address,
-            logs_dir=self.log_dir,
-            gcs_publisher=StdPublisher(),
-            is_proc_alive_fn=is_proc_alive,
-        )
+        
+        # Handle Ray version compatibility (gcs_publisher -> gcs_client in newer versions)
+        log_monitor_sig = inspect.signature(LogMonitor.__init__)
+        if "gcs_publisher" in log_monitor_sig.parameters:
+            # Older Ray versions
+            self.log_monitor = LogMonitor(
+                node_ip_address=self.node_ip_address,
+                logs_dir=self.log_dir,
+                gcs_publisher=StdPublisher(),
+                is_proc_alive_fn=is_proc_alive,
+            )
+        else:
+            # Newer Ray versions (2.53+) use gcs_client instead
+            # Create a wrapper that mimics the old interface
+            self.log_monitor = LogMonitorCompat(
+                node_ip_address=self.node_ip_address,
+                logs_dir=self.log_dir,
+                publisher=StdPublisher(),
+                is_proc_alive_fn=is_proc_alive,
+            )
         monitor_logger.setLevel(logging.CRITICAL)
 
         self.exception_monitor = None

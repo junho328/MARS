@@ -61,8 +61,11 @@ def start_ray_cluster():
         logger.info("Ray cluster already initialized")
         return False
 
+    # Limit CPUs to avoid thread exhaustion in container environments
+    num_cpus = os.environ.get("RAY_NUM_CPUS", "16")
+    
     if rank == 0:
-        cmd = f"ray start --head --port={master_port} --node-name={node_name}"
+        cmd = f"ray start --head --port={master_port} --node-name={node_name} --num-cpus={num_cpus}"
     else:
         # fix: 处理大规模下可能会出现的head/worker node创建顺序不一致问题
         time.sleep(5)
@@ -85,6 +88,26 @@ def init():
     world_size = get_driver_world_size()
     master_addr = get_driver_master_addr()
     master_port = get_driver_master_port()
+
+    # Check for local mode (single-process, no worker spawning)
+    use_local_mode = os.environ.get("RAY_LOCAL_MODE", "0") == "1"
+    
+    if use_local_mode:
+        logger.info("Using Ray local mode (single-process, no worker spawning)")
+        if not ray.is_initialized():
+            # Local mode: runs everything in driver process
+            # Disable dashboard to reduce overhead
+            ray.init(
+                num_cpus=int(os.environ.get("RAY_NUM_CPUS", "4")),
+                num_gpus=int(os.environ.get("RAY_NUM_GPUS", "1")),
+                namespace=RAY_NAMESPACE,
+                ignore_reinit_error=True,
+                include_dashboard=False,
+                _metrics_export_port=None,
+            )
+            logger.info("Ray initialized in local mode")
+        logger.info(f"Current ray cluster resources: {ray.available_resources()}")
+        return
 
     manual_start = start_ray_cluster()
     ray_tmpdir = _get_ray_temp_dir()
@@ -113,4 +136,4 @@ def init():
     logger.info(f"Current ray cluster resources: {ray.available_resources()}")
 
     if manual_start and rank > 0:
-        sys.exit(0)
+        sys.exit(0) 

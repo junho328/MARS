@@ -1,0 +1,159 @@
+# Multi-Agent Hanabi Self-Play Test Configuration
+# Minimal config for testing the multi-agent LoRA framework
+
+defaults:
+  - ../config/envs@_here_
+  - ../config/deepspeed_zero@_here_
+  - ../config/deepspeed_zero2@_here_
+  - ../config/deepspeed_zero3@_here_
+  - ../config/deepspeed_zero3_cpuoffload@_here_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: "multi_agent_hanabi_test"
+seed: 42
+logging_dir: ${oc.env:ROLL_OUTPUT_DIR,./output}/logs
+output_dir: ${oc.env:ROLL_OUTPUT_DIR,./output}
+
+system_envs:
+  USE_MODELSCOPE: "0"
+
+track_with: tensorboard
+tracker_kwargs:
+  log_dir: ${output_dir}/tensorboard
+
+# Multi-agent LoRA configuration (used by start_multi_agent_pipeline.py)
+lora_target: q_proj,k_proj,v_proj,o_proj
+lora_rank: 32
+lora_alpha: 32
+
+# Use single GPU to reduce worker count
+num_gpus_per_node: 1
+
+# Reduced steps for testing
+max_steps: 3
+save_steps: 100
+logging_steps: 1
+eval_steps: 1
+resume_from_checkpoint: false
+
+# Minimal config for container testing
+rollout_batch_size: 2
+val_batch_size: 2
+sequence_length: 1024
+
+dual_clip_loss: true
+ppo_epochs: 1
+adv_estimator: "reinforce"
+init_kl_coef: 0.0
+use_kl_loss: true
+kl_loss_coef: 0.20
+
+whiten_advantages: true
+entropy_loss_coef: 0
+
+# Using Qwen3-0.6B for multi-agent training (smaller model to avoid OOM)
+pretrain: Qwen/Qwen3-0.6B
+
+actor_train:
+  model_args:
+    flash_attn: sdpa
+    disable_gradient_checkpointing: false
+    dtype: bf16
+    lora_target: ${lora_target}
+    lora_rank: ${lora_rank}
+    lora_alpha: ${lora_alpha}
+    model_type: ~
+  training_args:
+    lr_scheduler_type: cosine_with_min_lr
+    learning_rate: 1e-5
+    weight_decay: 0.05
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    per_device_train_batch_size: 2
+    gradient_accumulation_steps: 1
+    warmup_steps: 1
+  data_args:
+    template: qwen3
+  strategy_args:
+    strategy_name: deepspeed_train
+    strategy_config: ${deepspeed_zero2}
+  device_mapping: "list(range(0,1))"
+  infer_batch_size: 1
+
+actor_infer:
+  model_args:
+    flash_attn: sdpa
+    disable_gradient_checkpointing: true
+    dtype: bf16
+    lora_target: ${lora_target}
+    lora_rank: ${lora_rank}
+    lora_alpha: ${lora_alpha}
+  generating_args:
+    max_new_tokens: 512
+    top_p: 0.95
+    top_k: 20
+    num_beams: 1
+    temperature: 0.6
+    num_return_sequences: 1
+  data_args:
+    template: qwen3
+  strategy_args:
+    strategy_name: hf_infer
+    strategy_config: ~
+  device_mapping: "list(range(0,1))"
+  infer_batch_size: 1
+
+reference:
+  model_args:
+    flash_attn: sdpa
+    disable_gradient_checkpointing: true
+    dtype: bf16
+    model_type: ~
+  data_args:
+    template: qwen3
+  strategy_args:
+    strategy_name: hf_infer
+    strategy_config: ~
+  device_mapping: "list(range(0,1))"
+  infer_batch_size: 1
+
+enable_response_mask: True
+action_sep: "||"
+use_turn_scores: True
+enable_think: True
+max_actions_per_traj: 10
+reward_normalization:
+  grouping: tags
+  method: mean
+  separate_norm_for_selfplay: true
+whiten_rewards: true
+advantage_norm: mean
+pg_clip_high: 0.20
+
+custom_envs:
+  MiniHanabi:
+    env_type: hanabi
+    max_actions_per_traj: ${max_actions_per_traj}
+    grid_vocab: false
+    env_config:
+      render_mode: text
+
+train_env_manager:
+  format_penalty: 0.05
+  max_env_num_per_worker: 1
+  env_groups: 1
+  group_size: 1
+  tags: [MiniHanabi]
+  n_groups: [1]
+
+val_env_manager:
+  max_env_num_per_worker: 1
+  env_groups: 1
+  group_size: 1
+  tags: [MiniHanabi]
+  n_groups: [1]
+
