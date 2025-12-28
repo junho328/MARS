@@ -1,4 +1,4 @@
-# bash examples/hanabi/run_agentic_pipeline_hanabi_selfplay.sh
+# bash examples/bridge/run_agentic_pipeline_bridge_selfplay.sh
 # tensorboard --logdir=/ext_hdd/jhna/mars/exps/agentic_pipeline/output/tensorboard_logs
 
 defaults:
@@ -15,8 +15,8 @@ hydra:
 
 exp_name: "agentic_pipeline"
 seed: 42
-logging_dir: /workspace/output/mars/exps/${exp_name}/output/logs
-output_dir: /workspace/output/mars/exps/${exp_name}/output
+logging_dir: /home/work/aipr-jhna/output/mars/exps/${exp_name}/output/logs
+output_dir: /home/work/aipr-jhna/output/mars/exps/${exp_name}/output
 
 # render_save_dir: ./runs/render
 system_envs:
@@ -24,9 +24,9 @@ system_envs:
 
 track_with: wandb
 tracker_kwargs:
- project: mars-hanabi-train
- name: hanabi_train_${exp_name}
- notes: "Hanabi self-play train"
+ project: mars-bridge-train
+ name: bridge_train_${exp_name}
+ notes: "Bridge self-play train with random opponent"
  dir: /workspace/output/mars/exps/${exp_name}/output/logs
 
 # track_with: tensorboard
@@ -38,7 +38,6 @@ lora_rank: 32
 lora_alpha: 32
 lora_dropout: 0.0
 lora_bias: "none"
-
 
 num_gpus_per_node: 2
 
@@ -150,7 +149,7 @@ enable_response_mask: True
 action_sep: "||"
 use_turn_scores: True # important to GAE when applying token-level rewards to token-level advantages. If False, will take the sum of scores as the reward for the last turn.
 enable_think: True # False -> no think RL
-max_actions_per_traj: 50
+max_actions_per_traj: 100
 reward_normalization:
   grouping: tags # 可以tags(env_type)/traj_group_id(group)/batch(rollout_batch)... group_by计算reward/adv
   method: mean # asym_clip / identity / mean_std
@@ -161,150 +160,25 @@ advantage_norm: mean
 pg_clip_high: 0.20
 
 custom_envs:
-  TicTacToe-first-100:
-    env_type: tictactoe
+  # Contract Bridge - 정식 4인 브릿지 (비딩 + 플레이)
+  ContractBridge:
+    env_type: bridge
     max_actions_per_traj: ${max_actions_per_traj}
     grid_vocab: false
     env_config:
-      built_in_opponent: mcts
+      built_in_opponent: random
       render_mode: text
-
-  TicTacToe-second-100:
-    env_type: tictactoe
-    max_actions_per_traj: ${max_actions_per_traj}
-    grid_vocab: false
-    env_config:
-      built_in_opponent: mcts
-      opponent_player: 0
-      render_mode: text
-
-  TicTacToe-first-1000:
-    env_type: tictactoe
-    max_actions_per_traj: ${max_actions_per_traj}
-    grid_vocab: false
-    env_config:
-      built_in_opponent: mcts
-      max_simulations: 1000
-      render_mode: text
-
-  TicTacToe-second-1000:
-    env_type: tictactoe
-    max_actions_per_traj: ${max_actions_per_traj}
-    grid_vocab: false
-    env_config:
-      built_in_opponent: mcts
-      opponent_player: 0
-      max_simulations: 1000
-      render_mode: text
-
-  Connect4-first-100:
-    env_type: connect_four
-    max_actions_per_traj: ${max_actions_per_traj}
-    grid_vocab: false
-    env_config:
-      built_in_opponent: mcts
-      render_mode: text
-
-  Connect4-second-100:
-    env_type: connect_four
-    max_actions_per_traj: ${max_actions_per_traj}
-    grid_vocab: false
-    env_config:
-      built_in_opponent: mcts
-      opponent_player: 0
-      render_mode: text
-
-  Connect4-first-1000:
-    env_type: connect_four
-    max_actions_per_traj: ${max_actions_per_traj}
-    grid_vocab: false
-    env_config:
-      built_in_opponent: mcts
-      max_simulations: 1000
-      render_mode: text
-
-  Connect4-second-1000:
-    env_type: connect_four
-    max_actions_per_traj: ${max_actions_per_traj}
-    grid_vocab: false
-    env_config:
-      built_in_opponent: mcts
-      opponent_player: 0
-      max_simulations: 1000
-      render_mode: text
-
-  KuhnPoker-first:
-    env_type: kuhn_poker
-    max_actions_per_traj:  ${max_actions_per_traj}
-    grid_vocab: false
-    env_config:
-      built_in_opponent: cfr
-      render_mode: text
-
-  KuhnPoker-second:
-    env_type: kuhn_poker
-    max_actions_per_traj:  ${max_actions_per_traj}
-    grid_vocab: false
-    env_config:
-      built_in_opponent: cfr
-      opponent_player: 0
-      render_mode: text
-
-  LeducPoker-first:
-    env_type: leduc_poker
-    max_actions_per_traj:  ${max_actions_per_traj}
-    grid_vocab: false
-    env_config:
-      built_in_opponent: ne
-      render_mode: text
-
-  LeducPoker-second:
-    env_type: leduc_poker
-    max_actions_per_traj:  ${max_actions_per_traj}
-    grid_vocab: false
-    env_config:
-      built_in_opponent: ne
-      opponent_player: 0
-      render_mode: text
-
-  MiniHanabi:
-    env_type: hanabi
-    max_actions_per_traj:  ${max_actions_per_traj}
-    grid_vocab: false
-    env_config:
-      render_mode: text
-
-  SimpleHanabi:
-    env_type: hanabi
-    max_actions_per_traj:  ${max_actions_per_traj}
-    grid_vocab: false
-    env_config:
-      render_mode: text
-      colors: 3
-      ranks: 2
-      hand_size: 5
-      max_information_tokens: 8
-      max_life_tokens: 3
-      
-  FullHanabi:
-    env_type: hanabi
-    max_actions_per_traj:  ${max_actions_per_traj}
-    grid_vocab: false
-    env_config:
-      render_mode: text
-      colors: 3
-      ranks: 3
-      hand_size: 5
-      max_information_tokens: 8
-      max_life_tokens: 3
+      dealer: 0
+      dealer_vul: false
+      non_dealer_vul: false
 
 train_env_manager:
-  format_penalty: 0.05 # sokoban env penalty_for_step=-0.1
+  format_penalty: 0.05 # penalty for wrong format
   max_env_num_per_worker: 64
   env_groups: 64
   # under the same group, the env config and env seed are ensured to be equal
   group_size: 1
-  tags: [MiniHanabi]
+  tags: [ContractBridge]
   n_groups: [64] # If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
 
 val_env_manager:
@@ -312,6 +186,6 @@ val_env_manager:
   env_groups: 32
   group_size: 1
   tags: [
-    MiniHanabi
+    ContractBridge
   ]
   n_groups: [32] #
