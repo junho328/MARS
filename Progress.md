@@ -5,7 +5,7 @@
 Implementing an RL finetuning framework with separate LoRA adapters per agent.
 Each adapter only updates during backprop for its respective agent's trajectories.
 
-## Status: COMPLETE (Unit Tests Passed, Integration Verified)
+## Status: ✅ TRAINING WORKING
 
 ### Current Phase
 - [x] Phase 0: Environment Setup (COMPLETE)
@@ -14,20 +14,22 @@ Each adapter only updates during backprop for its respective agent's trajectorie
 - [x] Phase 3: Training Loop Modification (COMPLETE)
 - [ ] Phase 4: Inference Adaptation (Optional - future work)
 - [x] Phase 5: Testing and Validation (COMPLETE)
+- [x] Phase 6: Full Multi-Agent Training with WandB (WORKING ✅)
 
-### Known Limitations
-- Full Ray pipeline requires containers with PID limit > 10000 (this container: 3840)
-- For resource-constrained environments, use `examples/run_multi_agent_no_ray.py`
-- Pre-download models before running to avoid concurrent download issues
-
-### Workaround for Container Limitations
-Run the non-Ray training script:
+### Full Training Command
 ```bash
-python examples/run_multi_agent_no_ray.py \
-    --model Qwen/Qwen3-0.6B \
+cd /workspace/MARS
+source /opt/miniforge3/etc/profile.d/conda.sh && conda activate mars-multi-agent
+
+export ROLL_OUTPUT_DIR=/workspace/MARS/output/multi_agent_hanabi_$(date +%Y%m%d-%H%M%S)
+mkdir -p $ROLL_OUTPUT_DIR
+
+python examples/start_multi_agent_pipeline.py \
+    --config_path examples/hanabi \
+    --config_name multi_agent_hanabi_wandb \
     --num_agents 2 \
-    --num_epochs 3 \
-    --lora_rank 16
+    --lora_rank 32 \
+    --lora_alpha 32
 ```
 
 ---
@@ -35,9 +37,9 @@ python examples/run_multi_agent_no_ray.py \
 ## Environment Information
 
 ### Hardware
-- GPU: 2x NVIDIA A100-SXM4-40GB
+- GPU: 2x NVIDIA A100-SXM4-80GB
 - CUDA Version: 13.0 (system) / 12.4 (PyTorch bundled)
-- Driver Version: 580.105.08
+- PID Limit: 4194304 (sufficient for Ray)
 
 ### Conda Environment
 - Name: `mars-multi-agent`
@@ -51,16 +53,47 @@ python examples/run_multi_agent_no_ray.py \
 | torch | 2.6.0+cu124 | OK |
 | vllm | 0.8.4 | OK |
 | peft | 0.12.0 | OK |
-| transformers | 4.51.2 | OK |
-| deepspeed | 0.18.3 | OK (upgraded from 0.16.0 for Triton fix) |
+| transformers | 4.57.3 | OK |
+| deepspeed | 0.18.3 | OK |
 | ray | 2.53.0 | OK |
 | open_spiel | 1.6.10 | OK |
+| wandb | 0.23.1 | OK |
 
-Note: flash-attn not installed due to CUDA version mismatch; using SDPA attention instead.
+Note: Using SDPA attention (flash-attn skipped due to CUDA version mismatch).
 
 ---
 
 ## Changelog
+
+### 2025-12-29: Full Training Working ✅
+- **Multi-Agent LoRA Training Successfully Running**
+  - Created `MultiAgentDeepSpeedStrategy` to apply PEFT before DeepSpeed initialization
+  - Fixed PEFT parameter name mapping for vLLM compatibility (strips `base_model.model.` and `.base_layer.` prefixes)
+  - Both validation and training rollouts completing successfully
+  - WandB logging active at `mars-multi-agent-hanabi` project
+  
+- **Key Architecture Changes**:
+  - `roll/multi_agent/strategy.py`: New DeepSpeed strategy that injects PEFT adapters before DeepSpeed wrapping
+  - `roll/multi_agent/worker.py`: Modified to pass multi-agent config to strategy before initialization
+  - `roll/multi_agent/pipeline.py`: Overrides parent init to ensure proper multi-agent config flow
+  - `roll/distributed/strategy/factory.py`: Registered `multi_agent_deepspeed_train` strategy
+
+- **Testing Results**:
+  - Using Qwen3-0.6B for faster iteration
+  - `val rollout progress: 100%|██████████| 96/96` ✅
+  - `train rollout progress: 100%|██████████| 64/64` ✅  
+  - Weight updates completing without errors ✅
+
+### 2025-12-29: Initial Training Setup
+- Recreated conda environment `mars-multi-agent` on new container with 2x A100-80GB
+- Installed all dependencies: PyTorch 2.6.0+cu124, vLLM 0.8.4, DeepSpeed 0.18.3
+- Pre-downloaded Qwen/Qwen3-4B model to avoid concurrent download issues
+- Created `examples/hanabi/multi_agent_hanabi_wandb.yaml` with:
+  - WandB tracking enabled (project: mars-multi-agent-hanabi)
+  - Full training params from original `agentic_val_hanabi_selfplay.yaml`
+  - Qwen3-4B model, 200 training steps
+  - Per-agent LoRA adapters (rank 32, alpha 32)
+- Container has sufficient PID limits for full Ray pipeline
 
 ### 2025-12-26: Integration Testing Complete
 - Fixed Ray 2.53+ LogMonitor API compatibility (`roll/distributed/scheduler/log_monitor.py`)
@@ -247,6 +280,7 @@ python examples/start_multi_agent_pipeline.py \
 | examples/hanabi/multi_agent_hanabi_test.yaml | DONE | Test config for Hanabi |
 | examples/run_multi_agent_no_ray.py | DONE | Non-Ray training script for containers |
 | tests/multi_agent/test_local_training.py | DONE | Local training test (no Ray) |
+| examples/hanabi/multi_agent_hanabi_wandb.yaml | DONE | Full training config with WandB |
 
 ---
 

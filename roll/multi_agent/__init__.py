@@ -8,12 +8,14 @@ Key Components:
 - MultiAgentConfig: Configuration for multi-agent training
 - MultiAgentLoRAModel: Model wrapper that manages multiple LoRA adapters
 - MultiAgentActorWorker: Modified actor worker for per-agent training
+- MultiAgentDeepSpeedStrategy: DeepSpeed strategy that applies PEFT before DeepSpeed init
 """
 
 from roll.multi_agent.config import MultiAgentConfig, MultiAgentLoRAConfig
 from roll.multi_agent.model import MultiAgentLoRAModel, create_multi_agent_model
 from roll.multi_agent.worker import MultiAgentActorWorker, get_multi_agent_worker_class
 from roll.multi_agent.pipeline import MultiAgentAgenticPipeline, create_multi_agent_pipeline
+from roll.multi_agent.strategy import MultiAgentDeepSpeedStrategy
 
 __all__ = [
     "MultiAgentConfig",
@@ -24,5 +26,6 @@ __all__ = [
     "get_multi_agent_worker_class",
     "MultiAgentAgenticPipeline",
     "create_multi_agent_pipeline",
+    "MultiAgentDeepSpeedStrategy",
 ]
 

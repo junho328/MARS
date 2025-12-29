@@ -41,8 +41,9 @@ class MultiAgentAgenticPipeline(AgenticPipeline):
     
     Key differences from AgenticPipeline:
     1. Creates MultiAgentActorWorker instead of ActorWorker
-    2. Configures per-agent LoRA adapters
-    3. Handles per-agent metrics aggregation
+    2. Uses MultiAgentDeepSpeedStrategy that applies PEFT before DeepSpeed
+    3. Injects multi-agent config BEFORE worker initialization
+    4. Handles per-agent metrics aggregation
     """
     
     def __init__(
@@ -50,34 +51,127 @@ class MultiAgentAgenticPipeline(AgenticPipeline):
         pipeline_config: AgenticConfig,
         multi_agent_config: MultiAgentConfig,
     ):
-        # Store multi-agent config before parent init
+        from roll.distributed.executor.cluster import Cluster
+        from roll.pipeline.base_pipeline import BasePipeline
+        
+        # Store multi-agent config
         self.multi_agent_config = multi_agent_config
         
-        # Modify worker class if multi-agent is enabled
+        # Modify config if multi-agent is enabled
         if multi_agent_config.enabled:
+            # Use our multi-agent worker
             pipeline_config.actor_train.worker_cls = (
                 "roll.multi_agent.worker.MultiAgentActorWorker"
             )
+            # Use our multi-agent DeepSpeed strategy
+            pipeline_config.actor_train.strategy_args.strategy_name = (
+                "multi_agent_deepspeed_train"
+            )
             logger.info(
-                f"Multi-agent training enabled with {multi_agent_config.num_agents} agents"
+                f"Multi-agent training enabled with {multi_agent_config.num_agents} agents, "
+                f"using multi_agent_deepspeed_train strategy"
             )
         
-        # Call parent init
-        super().__init__(pipeline_config)
+        # === BEGIN: Copy of AgenticPipeline.__init__ with modifications ===
+        # Call BasePipeline init (skipping AgenticPipeline's)
+        BasePipeline.__init__(self, pipeline_config)
+        self.pipeline_config: AgenticConfig
         
-        # Configure multi-agent workers
+        self.pipeline_config.set_max_steps(max_steps=self.pipeline_config.max_steps)
+        
+        self.tokenizer = default_tokenizer_provider(
+            model_args=self.pipeline_config.actor_train.model_args
+        )
+        self.kl_ctrl = get_kl_controller(
+            init_kl_coef=self.pipeline_config.init_kl_coef,
+            target_kl=self.pipeline_config.target_kl,
+            kl_horizon=self.pipeline_config.kl_horizon,
+        )
+        
+        # Create clusters
+        self.actor_train = Cluster(
+            name=self.pipeline_config.actor_train.name,
+            worker_cls=self.pipeline_config.actor_train.worker_cls,
+            resource_manager=self.resource_manager,
+            worker_config=self.pipeline_config.actor_train,
+        )
+        self.actor_infer = Cluster(
+            name=self.pipeline_config.actor_infer.name,
+            worker_cls=self.pipeline_config.actor_infer.worker_cls,
+            resource_manager=self.resource_manager,
+            worker_config=self.pipeline_config.actor_infer,
+        )
+        self.reference = Cluster(
+            name=self.pipeline_config.reference.name,
+            worker_cls=self.pipeline_config.reference.worker_cls,
+            resource_manager=self.resource_manager,
+            worker_config=self.pipeline_config.reference,
+        )
+        if self.pipeline_config.adv_estimator == "gae":
+            self.critic = Cluster(
+                name=self.pipeline_config.critic.name,
+                worker_cls=self.pipeline_config.critic.worker_cls,
+                resource_manager=self.resource_manager,
+                worker_config=self.pipeline_config.critic,
+            )
+        
+        self.train_rollout_scheduler = RolloutScheduler(
+            config=self.pipeline_config,
+            env_manager_config=self.pipeline_config.train_env_manager,
+            resource_manager=self.resource_manager,
+            infer_cluster=self.actor_infer,
+            mode="train",
+        )
+        self.val_rollout_scheduler = RolloutScheduler(
+            config=self.pipeline_config,
+            env_manager_config=self.pipeline_config.val_env_manager,
+            resource_manager=self.resource_manager,
+            infer_cluster=self.actor_infer,
+            mode="val",
+        )
+        
+        # CRITICAL: Pass multi-agent config to workers BEFORE initialization
         if multi_agent_config.enabled:
-            self._configure_multi_agent_workers()
+            self._send_multi_agent_config_to_workers()
+        
+        # Now initialize workers
+        refs = []
+        refs.extend(self.actor_train.initialize(
+            pipeline_config=self.pipeline_config, blocking=False
+        ))
+        if self.pipeline_config.adv_estimator == "gae":
+            refs.extend(self.critic.initialize(
+                pipeline_config=self.pipeline_config, blocking=False
+            ))
+        ray.get(refs)
+        
+        self.actor_infer.initialize(pipeline_config=self.pipeline_config, blocking=True)
+        self.reference.initialize(pipeline_config=self.pipeline_config, blocking=True)
+        
+        self.set_model_update_pair(
+            src_cluster=self.actor_train,
+            tgt_cluster=self.actor_infer,
+            frequency=self.pipeline_config.actor_train.model_update_frequency,
+        )
+        
+        if self.pipeline_config.adv_estimator == "gae":
+            self.set_checkpoint_clusters(self.actor_train, self.critic)
+        else:
+            self.set_checkpoint_clusters(self.actor_train)
+        
+        self.running = {}
+        # === END: Copy of AgenticPipeline.__init__ ===
+        
+        logger.info("MultiAgentAgenticPipeline initialized successfully")
     
-    def _configure_multi_agent_workers(self):
-        """Configure the actor train workers for multi-agent training."""
-        # Send multi-agent config to all workers
+    def _send_multi_agent_config_to_workers(self):
+        """Send multi-agent config to workers BEFORE they initialize."""
         refs = []
         for worker in self.actor_train.workers:
-            ref = worker.set_multi_agent_config.remote(self.multi_agent_config)
+            ref = worker.set_multi_agent_config_before_init.remote(self.multi_agent_config)
             refs.append(ref)
         ray.get(refs)
-        logger.info("Configured all actor train workers for multi-agent training")
+        logger.info(f"Sent multi-agent config to {len(refs)} workers before initialization")
     
     @torch.no_grad()
     def run(self):

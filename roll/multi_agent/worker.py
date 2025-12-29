@@ -20,7 +20,6 @@ from roll.distributed.strategy.factory import create_strategy
 from roll.distributed.strategy.strategy import TrainStrategy
 from roll.models.model_providers import default_actor_model_provider
 from roll.multi_agent.config import MultiAgentConfig
-from roll.multi_agent.model import MultiAgentLoRAModel, create_multi_agent_model
 from roll.pipeline.base_worker import ActorWorker
 from roll.utils.context_managers import state_offload_manger
 from roll.utils.functionals import append_to_dict, agg_loss, compute_approx_kl, masked_mean
@@ -35,7 +34,7 @@ class MultiAgentActorWorker(ActorWorker):
     Actor worker modified for multi-agent LoRA training.
     
     Key differences from ActorWorker:
-    1. Wraps base model with MultiAgentLoRAModel on initialization
+    1. Uses MultiAgentDeepSpeedStrategy that applies PEFT before DeepSpeed
     2. Partitions training batches by agent_id
     3. Switches active LoRA adapter before processing each agent's batch
     4. Accumulates per-agent metrics separately
@@ -44,35 +43,60 @@ class MultiAgentActorWorker(ActorWorker):
     def __init__(self, worker_config: WorkerConfig):
         super().__init__(worker_config)
         self.multi_agent_config: Optional[MultiAgentConfig] = None
-        self.multi_agent_model: Optional[MultiAgentLoRAModel] = None
+        self._pending_multi_agent_config: Optional[MultiAgentConfig] = None
     
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def set_multi_agent_config(self, config: MultiAgentConfig):
+    def set_multi_agent_config_before_init(self, config: MultiAgentConfig):
         """
-        Set the multi-agent configuration and wrap the model.
+        Set the multi-agent configuration BEFORE initialize() is called.
         
-        This should be called after initialize() but before training.
+        This stores the config so it can be passed to the strategy during initialization.
         """
-        self.multi_agent_config = config
+        self._pending_multi_agent_config = config
+        logger.info(f"Stored multi-agent config for initialization: {config.num_agents} agents")
+    
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def initialize(self, pipeline_config):
+        """
+        Initialize the worker with multi-agent support.
         
-        if not config.enabled:
-            logger.info("Multi-agent training disabled, using standard model")
-            return
+        This overrides the parent's initialize to pass multi-agent config
+        to the strategy BEFORE calling strategy.initialize().
+        """
+        # Call Worker's initialize (skipping ActorWorker's)
+        Worker.initialize(self, pipeline_config)
         
-        logger.info(f"Configuring MultiAgentActorWorker with {config.num_agents} agents")
+        # Create the strategy
+        self.strategy = create_strategy(worker=self)
         
-        # Get the base model from strategy and wrap with MultiAgentLoRAModel
-        base_model = self.strategy.unwrap_model()
+        # If we have a pending multi-agent config, pass it to the strategy
+        if self._pending_multi_agent_config is not None:
+            self.multi_agent_config = self._pending_multi_agent_config
+            
+            # Check if strategy supports multi-agent config
+            if hasattr(self.strategy, 'set_multi_agent_config'):
+                self.strategy.set_multi_agent_config(self.multi_agent_config)
+                logger.info(f"Passed multi-agent config to strategy")
+            else:
+                logger.warning(
+                    f"Strategy {type(self.strategy).__name__} does not support "
+                    f"set_multi_agent_config. Multi-agent LoRA will not be applied."
+                )
         
-        # Wrap with multi-agent LoRA
-        self.multi_agent_model = create_multi_agent_model(base_model, config)
+        # Now initialize the strategy (this will apply PEFT before DeepSpeed)
+        self.strategy.initialize(model_provider=default_actor_model_provider)
+        self.tokenizer = self.strategy.tokenizer
         
-        # Replace the model in the strategy
-        # This depends on the strategy implementation
-        if hasattr(self.strategy, 'model'):
-            self.strategy.model = self.multi_agent_model
+        if self.pipeline_config.resume_from_checkpoint:
+            load_dir = self.pipeline_config.resume_from_checkpoint
+            self.strategy.load_checkpoint(load_dir=load_dir, tag="checkpoint")
         
-        logger.info(f"MultiAgentActorWorker configured with {config.num_agents} agents")
+        self.logger.info(f"{self.worker_name} initialized with multi-agent support")
+        
+        self.strategy.offload_states()
+        
+        # Initialize CUDA context
+        torch.cuda.init()
     
     @register(dispatch_mode=Dispatch.DP_MP_DISPATCH_FIRST)
     def train_step(self, data: DataProto):
@@ -161,12 +185,6 @@ class MultiAgentActorWorker(ActorWorker):
         
         Uses group_ids to determine agent assignment. In self-play,
         group_ids have format "{base}_p{player_id}".
-        
-        Args:
-            data: The full training batch
-            
-        Returns:
-            Dict mapping agent_id to DataProto containing that agent's samples
         """
         result = {}
         
@@ -205,31 +223,28 @@ class MultiAgentActorWorker(ActorWorker):
     def _set_active_agent(self, agent_id: int) -> None:
         """
         Set the active LoRA adapter for the given agent.
-        
-        This method works with both MultiAgentLoRAModel and standard models.
         """
+        # Use strategy's method if available (MultiAgentDeepSpeedStrategy)
+        if hasattr(self.strategy, 'set_active_agent'):
+            self.strategy.set_active_agent(agent_id)
+            return
+        
+        # Fallback: try to access model directly
         model = self.strategy.unwrap_model()
         
-        if hasattr(model, 'set_active_agent'):
-            # MultiAgentLoRAModel
-            model.set_active_agent(agent_id)
-        elif hasattr(model, 'set_adapter'):
-            # Standard PEFT model with multiple adapters
+        if hasattr(model, 'set_adapter'):
+            # PEFT model
             adapter_name = f"agent_{agent_id}"
             model.set_adapter(adapter_name)
         else:
-            # Standard model without adapter switching
             logger.warning(
-                f"Model does not support adapter switching. "
-                f"Ignoring set_active_agent({agent_id})"
+                f"Cannot switch adapter. Model does not support set_adapter()."
             )
     
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def do_checkpoint(self, global_step):
         """
         Save checkpoint for multi-agent model.
-        
-        Saves each agent's adapter separately.
         """
         from codetiming import Timer
         
@@ -243,15 +258,8 @@ class MultiAgentActorWorker(ActorWorker):
             
             self.logger.info(f"Saving multi-agent checkpoint to {save_dir}")
             
-            # Check if model supports multi-agent saving
-            model = self.strategy.unwrap_model()
-            
-            if hasattr(model, 'save_all_adapters'):
-                model.save_all_adapters(save_dir)
-                exec_metrics = {"adapters_saved": self.multi_agent_config.num_agents}
-            else:
-                # Fall back to standard checkpoint
-                exec_metrics = self.strategy.save_checkpoint(save_dir, global_step, ckpt_id)
+            # Use strategy's save if available
+            exec_metrics = self.strategy.save_checkpoint(save_dir, global_step, ckpt_id)
         
         metrics = {
             f"time/{self.cluster_name}/do_checkpoint/total": total_timer.last,
@@ -265,9 +273,6 @@ class MultiAgentActorWorker(ActorWorker):
 
 def get_multi_agent_worker_class():
     """
-    Get the appropriate worker class for multi-agent training.
-    
-    Returns the worker class path string for use in configuration.
+    Get the worker class path for configuration.
     """
     return "roll.multi_agent.worker.MultiAgentActorWorker"
-

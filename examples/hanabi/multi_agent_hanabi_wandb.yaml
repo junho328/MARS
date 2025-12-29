@@ -1,0 +1,185 @@
+# Multi-Agent Hanabi Self-Play with WandB Logging
+# Full training config following original agentic_val_hanabi_selfplay.yaml parameters
+# For multi-agent LoRA training with separate adapters per player
+
+defaults:
+  - ../config/envs@_here_
+  - ../config/deepspeed_zero@_here_
+  - ../config/deepspeed_zero2@_here_
+  - ../config/deepspeed_zero3@_here_
+  - ../config/deepspeed_zero3_cpuoffload@_here_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: "multi_agent_hanabi"
+seed: 42
+logging_dir: ${oc.env:ROLL_OUTPUT_DIR,./output/multi_agent_hanabi}/logs
+output_dir: ${oc.env:ROLL_OUTPUT_DIR,./output/multi_agent_hanabi}
+
+system_envs:
+  USE_MODELSCOPE: "0"
+
+# WandB tracking - following original config
+track_with: wandb
+tracker_kwargs:
+  project: mars-multi-agent-hanabi
+  name: multi_agent_hanabi_${exp_name}
+  notes: "Multi-agent Hanabi self-play training with separate LoRA adapters"
+  dir: ${output_dir}
+
+# LoRA configuration - matching original
+lora_target: q_proj,k_proj,v_proj,o_proj
+lora_rank: 32
+lora_alpha: 32
+
+# GPU configuration
+num_gpus_per_node: 2
+
+# Training steps - matching original
+max_steps: 200
+save_steps: 20
+logging_steps: 1
+eval_steps: 5
+resume_from_checkpoint: false
+
+# Batch sizes - matching original (reduced for memory)
+rollout_batch_size: 64
+val_batch_size: 96
+sequence_length: 8192
+
+# PPO/RL parameters - matching original
+dual_clip_loss: true
+ppo_epochs: 1
+adv_estimator: "reinforce"
+init_kl_coef: 0.0
+use_kl_loss: true
+kl_loss_coef: 0.20
+
+whiten_advantages: true
+entropy_loss_coef: 0
+
+# Model - using smaller Qwen3-0.6B for faster testing
+pretrain: Qwen/Qwen3-0.6B
+
+actor_train:
+  model_args:
+    flash_attn: sdpa
+    disable_gradient_checkpointing: false
+    dtype: bf16
+    lora_target: ${lora_target}
+    lora_rank: ${lora_rank}
+    lora_alpha: ${lora_alpha}
+    model_type: ~
+  training_args:
+    lr_scheduler_type: cosine_with_min_lr
+    learning_rate: 1e-6
+    weight_decay: 0.05
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    per_device_train_batch_size: 2
+    gradient_accumulation_steps: 2
+    warmup_steps: 10
+  data_args:
+    template: qwen3
+  strategy_args:
+    strategy_name: deepspeed_train
+    strategy_config: ${deepspeed_zero2}
+  device_mapping: list(range(0,2))
+  infer_batch_size: 2
+
+actor_infer:
+  model_args:
+    flash_attn: sdpa
+    disable_gradient_checkpointing: true
+    dtype: bf16
+    lora_target: ${lora_target}
+    lora_rank: ${lora_rank}
+    lora_alpha: ${lora_alpha}
+  generating_args:
+    max_new_tokens: 2048
+    top_p: 0.99
+    top_k: 100
+    num_beams: 1
+    temperature: 0.6
+    num_return_sequences: 1
+  data_args:
+    template: qwen3
+  strategy_args:
+    strategy_name: vllm
+    strategy_config:
+      gpu_memory_utilization: 0.5
+      block_size: 16
+      load_format: auto
+  device_mapping: list(range(0,2))
+
+reference:
+  model_args:
+    flash_attn: sdpa
+    disable_gradient_checkpointing: true
+    dtype: bf16
+    model_type: ~
+  data_args:
+    template: qwen3
+  strategy_args:
+    strategy_name: hf_infer
+    strategy_config: ~
+  device_mapping: list(range(0,2))
+  infer_batch_size: 2
+
+# Agentic environment settings - matching original
+enable_response_mask: True
+action_sep: "||"
+use_turn_scores: True
+enable_think: True
+max_actions_per_traj: 50
+
+# Reward settings - matching original
+reward_normalization:
+  grouping: tags
+  method: mean
+  separate_norm_for_selfplay: true
+whiten_rewards: true
+advantage_norm: mean
+pg_clip_high: 0.20
+
+# Environment definitions
+custom_envs:
+  MiniHanabi:
+    env_type: hanabi
+    max_actions_per_traj: ${max_actions_per_traj}
+    grid_vocab: false
+    env_config:
+      render_mode: text
+
+  SimpleHanabi:
+    env_type: hanabi
+    max_actions_per_traj: ${max_actions_per_traj}
+    grid_vocab: false
+    env_config:
+      render_mode: text
+      colors: 3
+      ranks: 2
+      hand_size: 5
+      max_information_tokens: 8
+      max_life_tokens: 3
+
+# Training environment manager - matching original structure
+train_env_manager:
+  format_penalty: 0.05
+  max_env_num_per_worker: 64
+  env_groups: 64
+  group_size: 1
+  tags: [MiniHanabi]
+  n_groups: [64]
+
+# Validation environment manager
+val_env_manager:
+  max_env_num_per_worker: 32
+  env_groups: 64
+  group_size: 1
+  tags: [MiniHanabi, SimpleHanabi]
+  n_groups: [32, 32]
+

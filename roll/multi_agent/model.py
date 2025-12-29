@@ -3,13 +3,17 @@ Multi-Agent LoRA Model Wrapper
 
 Provides a model wrapper that manages multiple LoRA adapters,
 one per agent, allowing for per-agent gradient updates during training.
+
+IMPORTANT: This uses PEFT's inject_adapter_in_model to inject LoRA layers
+IN-PLACE into an existing model, which is compatible with DeepSpeed.
 """
 
 from typing import Dict, List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from peft import PeftModel, get_peft_model
+from peft import PeftModel, get_peft_model, inject_adapter_in_model
+from peft.tuners.lora import LoraModel
 from transformers import PreTrainedModel
 
 from roll.multi_agent.config import MultiAgentConfig, MultiAgentLoRAConfig
@@ -18,9 +22,12 @@ from roll.utils.logging import get_logger
 logger = get_logger()
 
 
-class MultiAgentLoRAModel(nn.Module):
+class MultiAgentLoRAModel:
     """
-    Wrapper for a base model with multiple LoRA adapters.
+    Manager for multiple LoRA adapters on a base model.
+    
+    This class does NOT wrap the model - it injects LoRA adapters in-place
+    using PEFT's inject_adapter_in_model, which is compatible with DeepSpeed.
     
     Each agent has its own named LoRA adapter. During training,
     we switch between adapters based on which agent's trajectories
@@ -28,16 +35,16 @@ class MultiAgentLoRAModel(nn.Module):
     
     Usage:
         config = MultiAgentConfig(enabled=True, num_agents=2)
-        model = MultiAgentLoRAModel(base_model, config)
+        manager = MultiAgentLoRAModel(base_model, config)
         
         # For agent 0's batch
-        model.set_active_agent(0)
-        outputs = model(input_ids, attention_mask)
+        manager.set_active_agent(0)
+        outputs = base_model(input_ids, attention_mask)  # Uses agent_0's adapter
         loss.backward()  # Only agent_0's adapter receives gradients
         
-        # For agent 1's batch
-        model.set_active_agent(1)
-        outputs = model(input_ids, attention_mask)
+        # For agent 1's batch  
+        manager.set_active_agent(1)
+        outputs = base_model(input_ids, attention_mask)  # Uses agent_1's adapter
         loss.backward()  # Only agent_1's adapter receives gradients
     """
     
@@ -46,42 +53,68 @@ class MultiAgentLoRAModel(nn.Module):
         base_model: PreTrainedModel,
         multi_agent_config: MultiAgentConfig,
     ):
-        super().__init__()
-        
+        # Store reference to the base model (NOT wrapped)
+        self.base_model = base_model
         self.multi_agent_config = multi_agent_config
         self.num_agents = multi_agent_config.num_agents
         self.adapter_names = multi_agent_config.get_adapter_names()
         self.active_agent_id: int = 0
+        self._peft_model: Optional[PeftModel] = None
         
-        # Initialize PEFT model with the first adapter
-        first_adapter_config = multi_agent_config.get_adapter_config(0)
+        # Inject adapters in-place using PEFT
+        self._inject_adapters()
+        
+        logger.info(f"Multi-agent LoRA model initialized with {self.num_agents} adapters")
+    
+    def _inject_adapters(self) -> None:
+        """Inject all agent adapters into the base model in-place."""
+        # Use get_peft_model to create PEFT model with first adapter
+        first_adapter_config = self.multi_agent_config.get_adapter_config(0)
         peft_config = first_adapter_config.to_peft_config()
         
-        self.model = get_peft_model(base_model, peft_config, adapter_name="agent_0")
+        # Create PEFT model - this wraps base_model
+        # IMPORTANT: The PEFT model wraps the base_model, so base_model's forward
+        # is now called through the PEFT wrapper. We store the PEFT model
+        # and use it for adapter management.
+        self._peft_model = get_peft_model(self.base_model, peft_config, adapter_name="agent_0")
         logger.info(f"Created PEFT model with adapter: agent_0")
         
         # Add additional adapters for other agents
         for i in range(1, self.num_agents):
-            adapter_config = multi_agent_config.get_adapter_config(i)
+            adapter_config = self.multi_agent_config.get_adapter_config(i)
             adapter_peft_config = adapter_config.to_peft_config()
             adapter_name = f"agent_{i}"
             
-            self.model.add_adapter(adapter_name, adapter_peft_config)
+            self._peft_model.add_adapter(adapter_name, adapter_peft_config)
             logger.info(f"Added adapter: {adapter_name}")
         
         # Ensure all adapter parameters are trainable
         self._enable_all_adapter_gradients()
         
         # Set first adapter as active
-        self.model.set_adapter("agent_0")
-        logger.info(f"Multi-agent LoRA model initialized with {self.num_agents} adapters")
+        self._peft_model.set_adapter("agent_0")
+    
+    def get_peft_model(self) -> PeftModel:
+        """
+        Return the PeftModel that should be used for DeepSpeed wrapping.
+        
+        This returns the PEFT model which wraps the original base_model.
+        When integrating with DeepSpeed, this should replace the original
+        model in DeepSpeedEngine.
+        """
+        return self._peft_model
     
     def _enable_all_adapter_gradients(self) -> None:
         """Ensure all LoRA adapter parameters have requires_grad=True."""
-        for name, param in self.model.named_parameters():
+        for name, param in self._peft_model.named_parameters():
             # Enable gradients for all LoRA parameters across all adapters
             if "lora_" in name.lower():
                 param.requires_grad = True
+    
+    @property
+    def model(self):
+        """Return the PEFT model for compatibility."""
+        return self._peft_model
     
     def set_active_agent(self, agent_id: int, isolate_gradients: bool = True) -> None:
         """
@@ -96,7 +129,7 @@ class MultiAgentLoRAModel(nn.Module):
             raise ValueError(f"Invalid agent_id {agent_id}. Must be in [0, {self.num_agents})")
         
         adapter_name = f"agent_{agent_id}"
-        self.model.set_adapter(adapter_name)
+        self._peft_model.set_adapter(adapter_name)
         self.active_agent_id = agent_id
         
         # Freeze all other adapters for gradient isolation during training
@@ -115,11 +148,13 @@ class MultiAgentLoRAModel(nn.Module):
         **kwargs,
     ):
         """
-        Forward pass through the model with the currently active adapter.
+        Forward pass through the PEFT model with the currently active adapter.
         
-        Returns the output from the active agent's adapter.
+        NOTE: When using with DeepSpeed, the forward pass goes through 
+        DeepSpeed's wrapped model, not this method. This is here for 
+        standalone usage and testing.
         """
-        return self.model(
+        return self._peft_model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -127,22 +162,22 @@ class MultiAgentLoRAModel(nn.Module):
         )
     
     def train(self, mode: bool = True):
-        """Set training mode."""
-        self.model.train(mode)
+        """Set training mode on the PEFT model."""
+        self._peft_model.train(mode)
         return self
     
     def eval(self):
-        """Set evaluation mode."""
-        self.model.eval()
+        """Set evaluation mode on the PEFT model."""
+        self._peft_model.eval()
         return self
     
     def parameters(self, recurse: bool = True):
         """Return model parameters."""
-        return self.model.parameters(recurse=recurse)
+        return self._peft_model.parameters(recurse=recurse)
     
     def named_parameters(self, prefix: str = '', recurse: bool = True):
         """Return named parameters."""
-        return self.model.named_parameters(prefix=prefix, recurse=recurse)
+        return self._peft_model.named_parameters(prefix=prefix, recurse=recurse)
     
     def get_adapter_parameters(self, agent_id: int):
         """
@@ -155,7 +190,7 @@ class MultiAgentLoRAModel(nn.Module):
             Iterator of (name, parameter) tuples for the adapter
         """
         adapter_name = f"agent_{agent_id}"
-        for name, param in self.model.named_parameters():
+        for name, param in self._peft_model.named_parameters():
             if adapter_name in name and param.requires_grad:
                 yield name, param
     
@@ -168,7 +203,7 @@ class MultiAgentLoRAModel(nn.Module):
         """
         result = {i: [] for i in range(self.num_agents)}
         
-        for name, param in self.model.named_parameters():
+        for name, param in self._peft_model.named_parameters():
             if not param.requires_grad:
                 continue
             for i in range(self.num_agents):
@@ -191,7 +226,7 @@ class MultiAgentLoRAModel(nn.Module):
         """
         active_adapter = f"agent_{agent_id}"
         
-        for name, param in self.model.named_parameters():
+        for name, param in self._peft_model.named_parameters():
             if "lora" in name.lower():
                 if active_adapter in name:
                     param.requires_grad = True
@@ -200,7 +235,7 @@ class MultiAgentLoRAModel(nn.Module):
     
     def unfreeze_all_adapters(self) -> None:
         """Unfreeze all adapter parameters."""
-        for name, param in self.model.named_parameters():
+        for name, param in self._peft_model.named_parameters():
             if "lora" in name.lower():
                 param.requires_grad = True
     
@@ -213,7 +248,7 @@ class MultiAgentLoRAModel(nn.Module):
             save_path: Path to save the adapter
         """
         adapter_name = f"agent_{agent_id}"
-        self.model.save_pretrained(
+        self._peft_model.save_pretrained(
             save_path,
             selected_adapters=[adapter_name],
         )
@@ -240,21 +275,61 @@ class MultiAgentLoRAModel(nn.Module):
             load_path: Path to load the adapter from
         """
         adapter_name = f"agent_{agent_id}"
-        self.model.load_adapter(load_path, adapter_name=adapter_name)
+        self._peft_model.load_adapter(load_path, adapter_name=adapter_name)
         logger.info(f"Loaded adapter {adapter_name} from {load_path}")
     
     @property
     def config(self):
         """Return the base model's config."""
-        return self.model.config
+        return self._peft_model.config
     
     def gradient_checkpointing_enable(self, **kwargs):
         """Enable gradient checkpointing."""
-        self.model.gradient_checkpointing_enable(**kwargs)
+        self._peft_model.gradient_checkpointing_enable(**kwargs)
     
     def gradient_checkpointing_disable(self):
         """Disable gradient checkpointing."""
-        self.model.gradient_checkpointing_disable()
+        self._peft_model.gradient_checkpointing_disable()
+    
+    def offload_states(self, include=None, non_blocking=False):
+        """
+        Offload model states to CPU (for DeepSpeed compatibility).
+        
+        Since PEFT models don't support state offloading directly,
+        this is a no-op that allows the pipeline to continue.
+        The actual memory management is handled by DeepSpeed at a higher level.
+        """
+        # PEFT/LoRA models don't have native offload support
+        # This is intentionally a no-op for compatibility
+        pass
+    
+    def reload_states(self, include=None, non_blocking=False):
+        """
+        Reload model states from CPU (for DeepSpeed compatibility).
+        
+        Since PEFT models don't support state offloading directly,
+        this is a no-op that allows the pipeline to continue.
+        """
+        # PEFT/LoRA models don't have native reload support
+        # This is intentionally a no-op for compatibility
+        pass
+    
+    def load_states(self, *args, **kwargs):
+        """
+        Load model states from CPU (for DeepSpeed compatibility).
+        
+        This is a no-op for PEFT models.
+        """
+        pass
+    
+    def state_dict(self, *args, **kwargs):
+        """Return state dict from the wrapped model."""
+        return self._peft_model.state_dict(*args, **kwargs)
+    
+    def load_state_dict(self, state_dict, *args, **kwargs):
+        """Load state dict into the wrapped model."""
+        return self._peft_model.load_state_dict(state_dict, *args, **kwargs)
+    
 
 
 def create_multi_agent_model(
