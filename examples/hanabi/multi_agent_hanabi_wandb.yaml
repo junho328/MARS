@@ -25,6 +25,7 @@ system_envs:
 # WandB tracking - following original config
 track_with: wandb
 tracker_kwargs:
+  entity: mars-hanabi-org  # WandB organization/team
   project: mars-multi-agent-hanabi
   name: multi_agent_hanabi_${exp_name}
   notes: "Multi-agent Hanabi self-play training with separate LoRA adapters"

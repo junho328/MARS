@@ -363,13 +363,21 @@ class MultiAgentAgenticPipeline(AgenticPipeline):
                 )
             
             # Data metrics
-            data_metrics = compute_data_metrics(batch=batch)
-            metrics.update(data_metrics)
+            try:
+                data_metrics = compute_data_metrics(batch=batch)
+                logger.info(f"Data metrics: {list(data_metrics.keys())}")
+                metrics.update(data_metrics)
+            except Exception as e:
+                logger.error(f"Error computing data_metrics: {e}")
             
             # Per-agent data metrics
             if self.multi_agent_config.enabled:
-                agent_data_metrics = self._compute_per_agent_metrics(batch, prefix="train")
-                metrics.update(agent_data_metrics)
+                try:
+                    agent_data_metrics = self._compute_per_agent_metrics(batch, prefix="train")
+                    logger.info(f"Per-agent metrics: {list(agent_data_metrics.keys())}")
+                    metrics.update(agent_data_metrics)
+                except Exception as e:
+                    logger.error(f"Error computing per-agent metrics: {e}")
             
             metrics["system/tps"] = tps_timer.mean_throughput
             metrics["system/samples"] = (global_step + 1) * batch.batch.shape[0]
@@ -378,6 +386,9 @@ class MultiAgentAgenticPipeline(AgenticPipeline):
             self.state.step = global_step
             self.state.log_history.append(metrics)
             self.do_checkpoint(global_step=global_step)
+            
+            # Debug: Log metrics keys being sent to WandB
+            logger.info(f"Logging {len(metrics)} metrics to WandB at step {global_step}: {list(metrics.keys())[:20]}")
             self.tracker.log(values=metrics, step=global_step)
             
             if global_step % self.pipeline_config.logging_steps == 0:

@@ -280,9 +280,9 @@ def masked_var(values, mask, unbiased=True):
         if mask_sum == 0:
             raise ValueError("At least one element in the mask has to be 1.")
         # note that if mask_sum == 1, then there is a division by zero issue
-        # to avoid it you just need to use a larger minibatch_size
+        # Return 0 variance for single sample (no variance can be computed)
         if mask_sum == 1:
-            raise ValueError("The sum of the mask is one, which can cause a division by zero.")
+            return torch.tensor(0.0, device=values.device, dtype=values.dtype)
         bessel_correction = mask_sum / (mask_sum - 1)
         variance = variance * bessel_correction
     return variance

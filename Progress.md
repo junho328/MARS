@@ -5,7 +5,7 @@
 Implementing an RL finetuning framework with separate LoRA adapters per agent.
 Each adapter only updates during backprop for its respective agent's trajectories.
 
-## Status: ✅ TRAINING WORKING
+## Status: TRAINING ACTIVELY RUNNING
 
 ### Current Phase
 - [x] Phase 0: Environment Setup (COMPLETE)
@@ -14,14 +14,14 @@ Each adapter only updates during backprop for its respective agent's trajectorie
 - [x] Phase 3: Training Loop Modification (COMPLETE)
 - [ ] Phase 4: Inference Adaptation (Optional - future work)
 - [x] Phase 5: Testing and Validation (COMPLETE)
-- [x] Phase 6: Full Multi-Agent Training with WandB (WORKING ✅)
+- [x] Phase 6: Full Multi-Agent Training with WandB (RUNNING)
 
 ### Full Training Command
 ```bash
 cd /workspace/MARS
 source /opt/miniforge3/etc/profile.d/conda.sh && conda activate mars-multi-agent
 
-export ROLL_OUTPUT_DIR=/workspace/MARS/output/multi_agent_hanabi_$(date +%Y%m%d-%H%M%S)
+export ROLL_OUTPUT_DIR=/workspace/MARS/output/multi_agent_neworg
 mkdir -p $ROLL_OUTPUT_DIR
 
 python examples/start_multi_agent_pipeline.py \
@@ -31,6 +31,11 @@ python examples/start_multi_agent_pipeline.py \
     --lora_rank 32 \
     --lora_alpha 32
 ```
+
+### Active Training Run
+- WandB: https://wandb.ai/mars-hanabi/mars-multi-agent-hanabi/runs/bjty2azh
+- Output: `/workspace/MARS/output/multi_agent_neworg`
+- Log: `/tmp/training_neworg.log`
 
 ---
 
@@ -65,7 +70,26 @@ Note: Using SDPA attention (flash-attn skipped due to CUDA version mismatch).
 
 ## Changelog
 
-### 2025-12-29: Full Training Working ✅
+### 2025-12-29: Extended Training Run (Latest)
+- **Active Training Session**
+  - Pipeline progressing through steps 7, 8, 9+ continuously
+  - Train rollouts completing: 64/64 trajectories per step
+  - Per-agent training: agent_0 completing 8/8 gradient updates per step (~5.5s per iteration)
+  - Weight updates: 758/758 parameters syncing successfully
+  - 199 metrics logged to WandB per step
+  
+- **WandB Configuration Updated**
+  - Organization changed to `mars-hanabi`
+  - Project: `mars-multi-agent-hanabi`
+  - Active run: https://wandb.ai/mars-hanabi/mars-multi-agent-hanabi/runs/bjty2azh
+
+- **Observed Training Behavior**
+  - Episodes starting with score -10.0 (expected for untrained model)
+  - Model generating `<think>` reasoning tokens correctly
+  - Memory efficiently managed: ~21.5GB per GPU, sleep mode freeing 36GB when not in use
+  - vLLM prefix cache resetting between steps
+
+### 2025-12-29: Full Training Working
 - **Multi-Agent LoRA Training Successfully Running**
   - Created `MultiAgentDeepSpeedStrategy` to apply PEFT before DeepSpeed initialization
   - Fixed PEFT parameter name mapping for vLLM compatibility (strips `base_model.model.` and `.base_layer.` prefixes)
@@ -78,11 +102,17 @@ Note: Using SDPA attention (flash-attn skipped due to CUDA version mismatch).
   - `roll/multi_agent/pipeline.py`: Overrides parent init to ensure proper multi-agent config flow
   - `roll/distributed/strategy/factory.py`: Registered `multi_agent_deepspeed_train` strategy
 
+- **Bug Fixes Applied**:
+  - `roll/multi_agent/worker.py`: Fixed `DataProto.select()` to `DataProto.select_idxs()` API call
+  - `roll/utils/functionals.py`: Fixed `masked_var()` to handle single-sample edge case (return 0 variance instead of error)
+
 - **Testing Results**:
   - Using Qwen3-0.6B for faster iteration
-  - `val rollout progress: 100%|██████████| 96/96` ✅
-  - `train rollout progress: 100%|██████████| 64/64` ✅  
-  - Weight updates completing without errors ✅
+  - `val rollout progress: 100%` 96/96
+  - `train rollout progress: 100%` 64/64
+  - Weight updates completing without errors
+  - Multi-agent train step completed: `agent_0 step 0: 100%`
+  - Pipeline progressing to step 1+
 
 ### 2025-12-29: Initial Training Setup
 - Recreated conda environment `mars-multi-agent` on new container with 2x A100-80GB
@@ -329,17 +359,15 @@ feat: Add multi-agent pipeline launcher and Hanabi config
 
 ## Next Steps
 
-1. **Full Integration Test**: Run the multi-agent pipeline with a real model:
-   ```bash
-   python examples/start_multi_agent_pipeline.py \
-       --config_path examples/hanabi \
-       --config_name multi_agent_hanabi_test \
-       --num_agents 2
-   ```
+1. **Monitor Active Training**: Training is running at https://wandb.ai/mars-hanabi/mars-multi-agent-hanabi/runs/bjty2azh
+   - Track `critic/score/mean` for improvement over episodes
+   - Monitor per-agent metrics: `train/agent_0/score/mean`
 
-2. **VLLM Adapter Switching (Optional)**: Modify inference to switch adapters per-agent during generation.
+2. **Scale to Larger Model**: Once training loop validated, switch to Qwen3-4B for production runs
 
-3. **Production Config**: Create production configs with larger models (Qwen3-4B).
+3. **VLLM Adapter Switching (Optional)**: Modify inference to switch adapters per-agent during generation
+
+4. **Multi-Agent Differentiation**: Currently training only agent_0; extend to train both agents with separate adapters
 
 ---
 

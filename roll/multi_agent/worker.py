@@ -211,9 +211,9 @@ class MultiAgentActorWorker(ActorWorker):
                 result[agent_id] = None
                 continue
             
-            # Extract samples for this agent
+            # Extract samples for this agent using select_idxs
             indices_tensor = torch.tensor(indices, device=data.batch.device)
-            agent_data = data.select(indices=indices_tensor)
+            agent_data = data.select_idxs(indices_tensor)
             result[agent_id] = agent_data
             
             logger.debug(f"Agent {agent_id}: {len(indices)} samples")
