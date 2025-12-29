@@ -41,10 +41,13 @@ def delete_tensor_grad_visitor(obj, path):
 
 def traverse_obj(value, visitor, path=()):
     """
-    遍历对象的所有属性，包括属性的属性，找到所有的 Tensor。
-    :param value: 任意 Python 对象
-    :visitor
-    :path
+    Recursively traverse all attributes of an object, including nested attributes, to find all Tensors.
+    This is useful for inspecting complex nested data structures and applying operations to all tensors.
+    
+    Args:
+        value: Any Python object to traverse (dict, list, tuple, or custom object)
+        visitor: Callback function that receives (value, path) and returns True to stop traversal
+        path: Tuple tracking the current traversal path (e.g., ('key1', 0, 'attr:name'))
     """
     if visitor(value, path):
         return
@@ -90,7 +93,7 @@ def divide_by_chunk_size(
     data: Union[np.ndarray, TensorDict], chunk_sizes: List[int]
 ) -> List[Union[np.ndarray, TensorDict]]:
     """
-    将numpy数组按照chunks的大小切分
+    Split numpy array by chunks size
     """
     if not isinstance(data, (np.ndarray, TensorDict)):
         raise TypeError("Input 'array' must be a numpy ndarray or a TensorDict.")
@@ -332,7 +335,7 @@ def masked_whiten(values: torch.Tensor, mask: torch.Tensor, shift_mean: bool = T
 
 def response_level_masked_whiten(values: torch.Tensor, mask: torch.Tensor, shift_mean: bool = True):
     """Whiten values with masked values."""
-    # 考虑response的影响？
+    # Consider the influence of response?
     mean = masked_mean(values, mask, dim=-1)
     var = masked_var(mean, mask)
     mean = mean.mean()
@@ -374,6 +377,26 @@ def concatenate_input_and_output(input_ids, output_ids, num_return_sequences):
 
 
 def compute_reinforce_return(token_level_rewards: torch.Tensor, gamma: torch.Tensor, lambd: torch.Tensor):
+    """
+    Compute discounted return-to-go for REINFORCE/GRPO algorithm.
+    
+    This implements the classic Monte Carlo return calculation:
+        G_t = r_t + gamma * G_{t+1}
+    where G_t is the return-to-go at timestep t.
+    
+    Used by:
+    - REINFORCE: Basic policy gradient with full episode returns
+    - GRPO (Group Relative Policy Optimization): REINFORCE + group normalization
+    
+    Args:
+        token_level_rewards: Rewards at each token position, shape (batch_size, seq_len)
+        gamma: Discount factor (typically 0.99 or 1.0 for undiscounted)
+        lambd: Not used in REINFORCE (kept for API compatibility with GAE)
+        
+    Returns:
+        advantages: Return-to-go at each position, shape (batch_size, seq_len)
+        returns: Same as advantages for REINFORCE (no baseline subtraction)
+    """
     with torch.no_grad():
         advantages_reversed = []
         gen_len = token_level_rewards.shape[-1]
@@ -390,11 +413,30 @@ def compute_reinforce_return(token_level_rewards: torch.Tensor, gamma: torch.Ten
 def compute_gae_advantage_return(
     token_level_rewards: torch.Tensor, values: torch.Tensor, gamma: torch.Tensor, lambd: torch.Tensor
 ):
-    """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py
+    """
+    Compute Generalized Advantage Estimation (GAE) for more stable policy gradients.
+    Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py
+    
+    GAE uses TD(λ) to balance bias-variance tradeoff:
+        δ_t = r_t + gamma * V(s_{t+1}) - V(s_t)  [TD error]
+        A_t^{GAE} = Σ_{l=0}^∞ (gamma * lambda)^l * δ_{t+l}
+    
+    Benefits:
+    - Reduces variance compared to Monte Carlo (lambd=1.0)
+    - Less biased than 1-step TD (lambd=0.0)
+    - Typical lambd=0.95 provides good balance
 
     Args:
-        token_level_rewards: `(torch.Tensor)`
-            shape: (bs, response_length)
+        token_level_rewards: Rewards at each token, shape (batch_size, seq_len)
+        values: Value function estimates V(s_t), shape (batch_size, seq_len+1)
+                Last value is bootstrap value for final state
+        gamma: Discount factor for future rewards (typically 0.99)
+        lambd: GAE lambda parameter controlling bias-variance (typically 0.95)
+        
+    Returns:
+        advantages: GAE advantages A_t^{GAE}, shape (batch_size, seq_len)
+        returns: Target values (advantages + baseline), shape (batch_size, seq_len)
+    
         values: `(torch.Tensor)`
             shape: (bs, response_length)
         gamma: `(float)`
@@ -460,31 +502,38 @@ def batch_reward_norm(response_level_rewards: torch.Tensor, div_std=True):
 
 def normalize_unique_values(tensor: torch.Tensor, mode="mean") -> torch.Tensor:
     """
-    对张量中所有不同的数值进行归一化。
-    例如：如果tensor为[1, 1, 1, 2, 2, 3, 3, 3, 3]，
-    那么将[1, 2, 3]归一化为[-1, 0, 1]，
-    最终结果为[-1, -1, -1, 0, 0, 1, 1, 1, 1]
+    Normalize all unique values in a tensor while preserving duplicate structure.
+    This is useful for advantage normalization where we want to normalize the unique advantage values
+    rather than all individual tokens, which helps with stability in multi-turn scenarios.
+    
+    Example: 
+        Input:  [1, 1, 1, 2, 2, 3, 3, 3, 3]
+        Unique: [1, 2, 3] -> normalized to [-1, 0, 1]
+        Output: [-1, -1, -1, 0, 0, 1, 1, 1, 1]
     
     Args:
-        tensor: 输入张量，形状为(bs, seq_len)或任意形状
+        tensor: Input tensor of any shape (typically (batch_size, seq_len))
+        mode: Normalization mode
+            - "mean": Subtract mean only (zero-center)
+            - "mean_std": Z-score normalization (subtract mean, divide by std)
         
     Returns:
-        归一化后的张量，保持原始形状
+        Normalized tensor maintaining original shape and duplicate structure
     """
     with torch.no_grad():
-        # 获取所有不同的数值
+        # Get all unique values
         unique_values = torch.unique(tensor)
         
-        # 如果只有一个唯一值，直接返回零张量
+        # If only one unique value, return zero tensor
         if len(unique_values) == 1:
             return torch.zeros_like(tensor)
         
-        # 对唯一值进行归一化：减去均值，除以标准差
+        # Normalize unique values: subtract mean, divide by std
         unique_mean = unique_values.mean()
         unique_std = unique_values.std()
         
         if unique_std == 0:
-            # 如果标准差为0，说明所有值都相同，返回零张量
+            # If std is 0, all values are identical; return zero tensor
             return torch.zeros_like(tensor)
         
         if mode == "mean_std":
@@ -494,15 +543,15 @@ def normalize_unique_values(tensor: torch.Tensor, mode="mean") -> torch.Tensor:
         else:
             raise ValueError(f"Invalid normalization mode: {mode}")
         
-        # 创建映射字典：原始值 -> 归一化值
+        # Create mapping dictionary: original value -> normalized value
         value_mapping = {}
         for i, original_val in enumerate(unique_values):
             value_mapping[original_val.item()] = normalized_unique[i].item()
         
-        # 创建结果张量
+        # Create result tensor to hold normalized values
         result = torch.zeros_like(tensor)
         
-        # 对每个唯一值进行替换
+        # Replace each unique value with its normalized counterpart
         for original_val, normalized_val in value_mapping.items():
             mask = (tensor == original_val)
             result[mask] = normalized_val
@@ -512,24 +561,28 @@ def normalize_unique_values(tensor: torch.Tensor, mode="mean") -> torch.Tensor:
 
 def normalize_unique_values_by_player(tensor: torch.Tensor, data: "DataProto", mode="mean") -> torch.Tensor:
     """
-    对张量中所有不同的数值进行归一化，分别对两个玩家单独处理。
-    参考 reward_normalize_by_player 的实现方式。
+    Normalize all unique values in a tensor, processing each player separately.
+    This follows the implementation pattern of reward_normalize_by_player to ensure
+    fair normalization in self-play scenarios where Player 0 and Player 1 may have
+    different reward distributions.
     
     Args:
-        tensor: 输入张量，形状为(bs, seq_len)或任意形状
-        data: DataProto包含group_ids信息
-        mode: 归一化模式，"mean"或"mean_std"
+        tensor: Input tensor of any shape (typically advantages or rewards)
+        data: DataProto containing group_ids with player information (e.g., "env_0_p0", "env_1_p1")
+        mode: Normalization mode
+            - "mean": Subtract mean only
+            - "mean_std": Z-score normalization
         
     Returns:
-        归一化后的张量，保持原始形状
+        Normalized tensor maintaining original shape, with per-player normalization applied
     """
-    # 提取玩家信息从group_ids
+    # Extract player information from group_ids
     group_ids = data.non_tensor_batch.get("group_ids", [])
     if len(group_ids) == 0:
-        # 如果没有group_ids，回退到普通的归一化
+        # If no group_ids available, fallback to standard normalization
         return normalize_unique_values(tensor, mode=mode)
     
-    # 识别玩家索引
+    # Identify indices for each player (player 0 and player 1)
     player_0_indices = []
     player_1_indices = []
     
@@ -541,17 +594,17 @@ def normalize_unique_values_by_player(tensor: torch.Tensor, data: "DataProto", m
             elif player_id == "1":
                 player_1_indices.append(i)
         else:
-            # 如果没有玩家信息，默认分配给玩家0
+            # If no player marker found, default to player 0
             player_0_indices.append(i)
     
-    # 如果没有找到清晰的玩家分离，回退到普通归一化
+    # If no clear player separation found, fallback to standard normalization
     if len(player_0_indices) == 0 and len(player_1_indices) == 0:
         return normalize_unique_values(tensor, mode=mode)
     
-    # 创建结果张量
+    # Create result tensor to hold normalized values
     normalized_tensor = tensor.clone()
     
-    # 对玩家0的tensor进行归一化（如果存在）
+    # Normalize player 0's tensor (if exists)
     if len(player_0_indices) > 0:
         player_0_indices_tensor = torch.tensor(player_0_indices, dtype=torch.long)
         player_0_tensor = tensor[player_0_indices_tensor]
@@ -559,7 +612,7 @@ def normalize_unique_values_by_player(tensor: torch.Tensor, data: "DataProto", m
         player_0_normalized = normalize_unique_values(player_0_tensor, mode=mode)
         normalized_tensor[player_0_indices_tensor] = player_0_normalized
     
-    # 对玩家1的tensor进行归一化（如果存在）
+    # Normalize player 1's tensor (if exists)
     if len(player_1_indices) > 0:
         player_1_indices_tensor = torch.tensor(player_1_indices, dtype=torch.long)
         player_1_tensor = tensor[player_1_indices_tensor]
@@ -605,7 +658,7 @@ def compute_token_reward(data: "DataProto", pipeline_config: RLVRConfig, kl_ctrl
         action_mask=data.batch["response_mask"][:, 1:],
         kl_penalty=pipeline_config.kl_penalty,
     )
-    # 是否添加token level kl
+    # Whether to add token level kl
     if pipeline_config.add_token_level_kl and "ref_log_probs" in data.batch.keys():
         beta = kl_ctrl.value
         token_level_rewards = token_level_rewards - beta * kld
@@ -635,8 +688,8 @@ def compute_token_reward(data: "DataProto", pipeline_config: RLVRConfig, kl_ctrl
 def reward_postprocess(data: "DataProto", pipeline_config: RLVRConfig, running_ctrl):
     response_level_rewards = data.batch["response_level_rewards"].clone().detach()
     response_level_metrics = {"critic/reward_clip_frac": 0.0}
-    # 对reward进行处理: 可以选择不同的normalization方法
-    # 使用group-based normalization (按prompt分组)
+    # Process rewards: can choose different normalization methods
+    # Use group-based normalization (grouped by prompt)
     if pipeline_config.adv_estimator == "grpo" or pipeline_config.reward_norm == "group":
         if pipeline_config.reward_shift:
             data = group_reward_norm(
@@ -652,14 +705,14 @@ def reward_postprocess(data: "DataProto", pipeline_config: RLVRConfig, running_c
             )
         response_level_rewards = data.batch["response_level_rewards"].clone().detach()
 
-    # 使用batch-based normalization (整个batch)
+    # Use batch-based normalization (entire batch)
     elif pipeline_config.reward_norm == "batch":
         if hasattr(pipeline_config, "reward_shift") and pipeline_config.reward_shift:
             response_level_rewards = batch_reward_norm(response_level_rewards, div_std=False)
         else:
             response_level_rewards = batch_reward_norm(response_level_rewards, div_std=True)
 
-    # 使用running statistics进行normalization
+    # Use running statistics for normalization
     elif pipeline_config.reward_norm == "running":
         running = running_ctrl["domain"]
         running.update(response_level_rewards)
@@ -672,7 +725,7 @@ def reward_postprocess(data: "DataProto", pipeline_config: RLVRConfig, running_c
         else:
             response_level_rewards = (response_level_rewards - mean) / std
 
-    # 对reward进行clip
+    # Clip rewards
     if pipeline_config.reward_clip:
         reward_clip_frac = compute_clip_fraction(
             values=response_level_rewards, clip_max=pipeline_config.reward_clip, clip_min=-pipeline_config.reward_clip
@@ -692,7 +745,7 @@ def get_sample_level_mask(data: "DataProto", pipeline_config: RLVRConfig):
     batch_size = data.batch["response_mask"].size(0)
     mask_metrics = {}
 
-    # mask相关策略
+    # Mask-related strategies to filter out low-quality or problematic samples
     data.batch["origin_response_mask"] = data.batch["response_mask"].clone()
     response_mask = data.batch["response_mask"][:, 1:].clone()
     true_response_length = response_mask.sum(-1).float()
@@ -700,7 +753,7 @@ def get_sample_level_mask(data: "DataProto", pipeline_config: RLVRConfig):
 
     final_sample_mask = torch.ones(batch_size, device=response_mask.device)
 
-    # 1. max_len_mask: 过滤掉超过最大长度的样本
+    # 1. max_len_mask: Filter out samples that exceeded maximum length during generation
     if pipeline_config.max_len_mask:
         max_len_mask = (max_response_length != true_response_length).float()
         final_sample_mask = final_sample_mask * max_len_mask
@@ -708,7 +761,7 @@ def get_sample_level_mask(data: "DataProto", pipeline_config: RLVRConfig):
     else:
         mask_metrics["actor/max_len_mask_ratio"] = 1.0
 
-    # 2. difficulty_mask: 基于难度的过滤
+    # 2. difficulty_mask: difficulty-based filtering
     if pipeline_config.difficulty_mask:
         data = difficulty_mask(
             data,
@@ -725,7 +778,7 @@ def get_sample_level_mask(data: "DataProto", pipeline_config: RLVRConfig):
     else:
         mask_metrics["actor/difficulty_mask_ratio"] = 1.0
 
-    # 3. error_max_len_clip: 基于错误和长度的过滤
+    # 3. error_max_len_clip: filtering based on errors and length
     if pipeline_config.error_max_len_clip:
         scores = data.batch["scores"]
         error_len_mask = ((scores == 0) & (true_response_length < pipeline_config.error_max_len_threshold)) | (
@@ -807,6 +860,7 @@ def reward_normalize_by_player(data: "DataProto", rewards: torch.Tensor, rn_cfg,
     Returns:
         torch.Tensor: normalized rewards with same shape as input
     """
+    # import pdb; pdb.set_trace()
     # Extract player information from group_ids
     group_ids = data.non_tensor_batch.get("group_ids", [])
     if len(group_ids) == 0:
@@ -956,6 +1010,28 @@ def reward_postprocess_agentic(data: "DataProto", pipeline_config: AgenticConfig
 
 @torch.no_grad()
 def apply_kl_penalty(data: "DataProto", kl_ctrl: AdaptiveKLController, kl_penalty="kl"):
+    """
+    Apply KL divergence penalty to rewards to prevent policy from deviating too far from reference.
+    
+    This implements the KL-constrained RL objective:
+        r'_t = r_t - beta * KL(pi || pi_ref)
+    where beta is adaptively adjusted based on observed KL divergence.
+    
+    KL penalty types:
+    - "kl": Standard KL divergence D_KL(pi || pi_ref)
+    - "abs": Absolute difference |log pi - log pi_ref|
+    - "mse": Mean squared error (log pi - log pi_ref)^2
+    - "full": Full KL with both forward and reverse terms
+    
+    Args:
+        data: DataProto containing old_log_probs and ref_log_probs
+        kl_ctrl: Adaptive controller for KL coefficient beta
+        kl_penalty: Type of KL penalty to apply
+        
+    Returns:
+        data: Updated DataProto with KL-penalized token_level_rewards
+        metrics: Dictionary with kl and kl_coef for logging
+    """
     response_mask = data.batch["response_mask"][:, 1:]
 
     token_level_rewards = expand_to_token_level(data)
@@ -1001,6 +1077,37 @@ def compute_advantage(
     advantage_norm=None,
     response_mask=None,
 ):
+    """
+    Compute advantages for policy gradient training using various estimators.
+    
+    This is the main entry point for advantage computation in agentic RL.
+    Supports multiple estimation methods:
+    - REINFORCE: Monte Carlo returns (high variance, unbiased)
+    - GAE: Generalized Advantage Estimation (bias-variance tradeoff)
+    - GRPO: Group Relative Policy Optimization (REINFORCE + group normalization)
+    
+    Processing steps:
+    1. Whiten rewards if enabled (zero mean, unit variance normalization)
+    2. Compute advantages using selected estimator
+    3. Normalize unique advantage values (for multi-turn consistency)
+    4. Whiten advantages if enabled
+    5. Clip advantages if specified
+    
+    Args:
+        data: DataProto containing batch with token_level_rewards, values (for GAE), etc.
+        gamma: Discount factor (0.0-1.0, typically 0.99 or 1.0)
+        lambd: GAE lambda parameter (0.0-1.0, typically 0.95)
+        adv_estimator: Advantage estimation method ("reinforce", "gae", or "grpo")
+        advantage_clip: Max absolute advantage value for clipping (None = no clipping)
+        whiten_advantages: If True, normalize advantages to zero mean and unit variance
+        whiten_rewards: If True, normalize rewards before computing advantages
+        advantage_norm: Mode for normalizing unique advantages ("mean" or "mean_std")
+        response_mask: Mask for response tokens (None = use data.batch["response_mask"])
+        
+    Returns:
+        data: Updated DataProto with advantages and returns in batch
+        metrics: Dictionary of advantage-related metrics for logging
+    """
     if response_mask is None:
         response_mask = data.batch["response_mask"][:, 1:]
 
@@ -1066,8 +1173,8 @@ def postprocess_generate(
     from roll.distributed.scheduler.protocol import DataProto
 
     if fill_eos_token:
-        # yali: 如果output最后一个token不是pad_token_id，则替换成eos_token_id,
-        #  TODO: 需要消融这个变化的影响
+        # yali: if last token of output is not pad_token_id, replace with eos_token_id
+        #  TODO: Need to ablate the impact of this change
         last_token_index = output.size(1) - 1
         need_replace_mask = output[:, last_token_index] != pad_token_id
         output[need_replace_mask, last_token_index] = eos_token_id
