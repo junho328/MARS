@@ -183,13 +183,18 @@ class EnvManager:
         mode="train",
     ):
         """
-        1. 一个EnvManager持有一个env实例: 执行env.reset, env.step, 管理rollout的状态
-            group trajectory表达: group内的init state一致，依赖env_config 中的seed来控制, 一个group内env 对应episode的seed一致
-            EnvWorker持有多个EnvManager，通过线程的方式实现EnvWorker内部并行
-        2. run_rollout_loop, 持续rollout trajectory, 将done的trajectory回传到output_queue
+        Architecture of EnvManager:
+        
+        1. Each EnvManager holds a single env instance: executes env.reset, env.step, and manages rollout state
+           - Group trajectory representation: all episodes within a group share the same init state, controlled by seed in env_config
+           - Each env within a group corresponds to episodes with consistent seeds
+           - EnvWorker holds multiple EnvManagers, implementing parallel execution within EnvWorker using threads
+        
+        2. run_rollout_loop: continuously rollout trajectories and send completed trajectories back to output_queue
+        
         TODO:
-            1. special tokens add to config
-            2. ray max_concurrency 描述多线程是否会更好？
+            1. Add special tokens to config for better extensibility
+            2. Consider whether ray max_concurrency would better describe multi-threading behavior
         """
         self.logger = get_logger()
         self.worker_config: EnvManagerConfig = worker_config
@@ -384,7 +389,7 @@ class EnvManager:
         lm_output: DataProto = ray.get(self.generate_scheduler.generate_one_request.remote(data=gen_batch))
 
         if lm_output is not None:
-            # 未被abort
+            # Not aborted
             gen_batch.meta_info.pop("generation_config")
             lm_input = lm_input.repeat(repeat_times=generation_config["num_return_sequences"])
             lm_output.union(lm_input)
@@ -392,11 +397,14 @@ class EnvManager:
 
     def run_rollout_loop(self, data: DataProto):
         """
-        1. 每次调用run_rollout_loop,
-            会持续的play episode, 直到收到采集完成的command
-            需要重置seed, 确保每个group的seed一致
-            episode_id 置0
-        seed更新逻辑:
+        Run continuous rollout loop for trajectory collection.
+        
+        1. Each call to run_rollout_loop:
+           - Continuously plays episodes until receiving a collection completion command
+           - Resets seed to ensure consistency within each group
+           - Resets episode_id to 0
+        
+        Seed update logic:
             group_seed = seed + group_seed
             episode_seed = group_seed + episode_id
 
@@ -507,9 +515,12 @@ class EnvManager:
 
     def formulate_rollouts(self):
         """
-        1. 每个env的trajectory 应该是一个rollout
-        2. 每个rollout 应该是一个List[Dict]
-        3. 每个Dict 应该是一个step的信息
+        Formulate rollout trajectories from environment history.
+        
+        Structure:
+        1. Each env's trajectory should be a single rollout
+        2. Each rollout should be a List[Dict]
+        3. Each Dict should contain information for one step
         4. For self-play mode, generate separate trajectories for both players
         
         Returns:
@@ -914,7 +925,7 @@ class EnvManager:
             else:
                 text += "<answer>"  # force the LLM to answer
 
-        # TODO: 应该没有必要，注意处理mask
+        # TODO: This replacement may not be necessary, pay attention to mask handling
         # TODO: special tokens add to config
         text = text.replace("<|im_end|>\n", "<|im_end|>")
         return [text], [messages]
