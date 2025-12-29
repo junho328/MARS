@@ -494,13 +494,19 @@ class EnvManager:
         # 保护rollout_cache的读取
         with self.internal_lock:
             if self.rollout_cache["is_self_play"]:
-                # Self-play mode
+                # Self-play mode - debug logging
+                p0_len = len(self.rollout_cache["player_0_history"])
+                p1_len = len(self.rollout_cache["player_1_history"])
+                self.logger.info(f"formulate_rollouts: is_self_play=True, player_0_history={p0_len}, player_1_history={p1_len}")
+                
                 rollouts = []
                 for player_id in [0, 1]:
                     history_key = f"player_{player_id}_history"
                     if len(self.rollout_cache[history_key]) > 0:
                         rollouts.append(self._formulate_single_rollout(player_id=player_id))
                         self.num_states[player_id] += len(self.rollout_cache[history_key])
+                    else:
+                        self.logger.warning(f"Player {player_id} has empty history, skipping rollout")
                 return rollouts
             else:
                 # Single agent mode - return single rollout

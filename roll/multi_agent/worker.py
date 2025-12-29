@@ -144,6 +144,20 @@ class MultiAgentActorWorker(ActorWorker):
                 if batch_size == 0:
                     continue
                 
+                # Drop excess samples to make batch_size divisible by mini_batch_size
+                if batch_size % backward_batch_size != 0:
+                    usable_size = (batch_size // backward_batch_size) * backward_batch_size
+                    if usable_size == 0:
+                        self.logger.warning(
+                            f"Agent {agent_id} has {batch_size} samples, less than mini_batch_size {backward_batch_size}, skipping"
+                        )
+                        continue
+                    self.logger.info(
+                        f"Agent {agent_id}: dropping {batch_size - usable_size} samples to make {usable_size} divisible by {backward_batch_size}"
+                    )
+                    agent_data = agent_data.select_idxs(list(range(usable_size)))
+                    batch_size = usable_size
+                
                 self.logger.info(
                     f"Training agent_{agent_id} with {batch_size} samples"
                 )
@@ -197,11 +211,20 @@ class MultiAgentActorWorker(ActorWorker):
         group_ids = data.non_tensor_batch["group_ids"]
         batch_size = len(group_ids)
         
+        # Log sample group_ids for debugging
+        sample_gids = [str(gid) for gid in group_ids[:5]]
+        self.logger.info(f"Partitioning {batch_size} samples. Sample group_ids: {sample_gids}")
+        
         # Determine agent_id for each sample
         agent_ids = []
         for gid in group_ids:
             agent_id = self.multi_agent_config.agent_id_from_group_id(str(gid))
             agent_ids.append(agent_id)
+        
+        # Log agent distribution
+        from collections import Counter
+        agent_counts = Counter(agent_ids)
+        self.logger.info(f"Agent distribution: {dict(agent_counts)}")
         
         # Create mask for each agent
         for agent_id in range(self.multi_agent_config.num_agents):
@@ -209,6 +232,7 @@ class MultiAgentActorWorker(ActorWorker):
             
             if len(indices) == 0:
                 result[agent_id] = None
+                self.logger.info(f"Agent {agent_id}: 0 samples (skipping)")
                 continue
             
             # Extract samples for this agent using select_idxs
@@ -216,7 +240,7 @@ class MultiAgentActorWorker(ActorWorker):
             agent_data = data.select_idxs(indices_tensor)
             result[agent_id] = agent_data
             
-            logger.debug(f"Agent {agent_id}: {len(indices)} samples")
+            self.logger.info(f"Agent {agent_id}: {len(indices)} samples")
         
         return result
     
