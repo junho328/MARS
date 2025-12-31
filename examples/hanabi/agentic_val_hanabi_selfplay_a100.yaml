@@ -1,0 +1,324 @@
+# bash examples/hanabi/run_agentic_pipeline_hanabi_selfplay.sh
+# tensorboard --logdir=/ext_hdd/jhna/mars/exps/agentic_pipeline/output/tensorboard_logs
+
+defaults:
+  - ../config/envs@_here_
+  - ../config/deepspeed_zero@_here_
+  - ../config/deepspeed_zero2@_here_
+  - ../config/deepspeed_zero3@_here_
+  - ../config/deepspeed_zero3_cpuoffload@_here_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: "agentic_pipeline"
+seed: 42
+logging_dir: /workspace/MARS/exps/${exp_name}/output/logs
+output_dir: /workspace/MARS/exps/${exp_name}/output
+
+# render_save_dir: ./runs/render
+system_envs:
+  # USE_MODELSCOPE: "1" to use ModelScope for model downloads, "0" for Hugging Face
+  USE_MODELSCOPE: "0"
+  # Ray configuration to prevent thread exhaustion with many workers
+  # Allows up to 1000 pending resource requests per category
+  RAY_max_pending_lease_requests_per_scheduling_category: "1000"
+  # Limits concurrent worker initialization to 4 at a time (prevents "can't start new thread" errors)
+  RAY_worker_maximum_startup_concurrency: "4"
+
+track_with: wandb
+tracker_kwargs:
+ project: mars-hanabi-train
+ name: hanabi_train_${exp_name}
+ notes: "Hanabi self-play train"
+ dir: /workspace/MARS/exps/${exp_name}/output/logs
+
+# track_with: tensorboard
+# tracker_kwargs:
+#   log_dir: /ext_hdd/jhna/mars/exps/${exp_name}/output/tensorboard_logs
+
+lora_target: o_proj,q_proj,k_proj,v_proj
+lora_rank: 32
+lora_alpha: 32
+lora_dropout: 0.0
+lora_bias: "none"
+
+
+num_gpus_per_node: 2  # Number of GPUs available for training and inference
+
+max_steps: 200  # Total number of training steps (rollout + train iterations)
+save_steps: 20  # Save model checkpoint every N steps
+logging_steps: 1  # Log metrics to wandb/tensorboard every N steps
+eval_steps: 5  # Run validation every N steps
+resume_from_checkpoint: false  # Set to true or provide path to resume training
+
+# Rollout and validation batch sizes
+rollout_batch_size: 128  # Number of trajectories to collect per rollout (affects sample efficiency)
+val_batch_size: 64  # Number of validation trajectories (larger = more stable metrics)
+sequence_length: 32768  # Maximum sequence length in tokens (context window)
+
+# reward_clip: 10  # Optional: Clip rewards to [-reward_clip, +reward_clip]
+# advantage_clip: 4  # Optional: Clip advantages to [-advantage_clip, +advantage_clip]
+dual_clip_loss: true  # Use dual-clip PPO loss (helps with stability)
+ppo_epochs: 1  # Number of epochs to train on each rollout batch
+adv_estimator: "reinforce"  # Advantage estimator: "reinforce" (GRPO/return-to-go), "gae" (Generalized Advantage Estimation), "grpo"
+# pg_clip: 0.1  # Optional: Clip ratio for standard PPO (not used with dual_clip_loss)
+#dual_clip_loss: True
+init_kl_coef: 0.0  # Initial KL divergence coefficient (if using KL penalty instead of loss)
+use_kl_loss: true  # Use differentiable KL loss (GRPO-style) instead of KL penalty
+kl_loss_coef: 0.20  # Weight for KL divergence loss term
+
+whiten_advantages: true  # Normalize advantages to zero mean and unit variance (improves stability)
+entropy_loss_coef: 0  # Entropy regularization coefficient (0 = no entropy bonus)
+
+pretrain: /workspace/models/Qwen3-4B  # Path to pretrained model (local or HuggingFace model ID)
+
+actor_train:
+  model_args:
+    flash_attn: fa2  # Use Flash Attention 2 for efficient attention computation
+    disable_gradient_checkpointing: false  # Keep gradient checkpointing enabled to save memory
+    dtype: bf16  # Use bfloat16 precision (faster, less memory, similar accuracy to fp32)
+    lora_target: ${lora_target}  # Which modules to apply LoRA to
+    lora_rank: ${lora_rank}  # LoRA rank (lower = fewer parameters, faster training)
+    lora_alpha: ${lora_alpha}  # LoRA scaling factor
+    lora_dropout: ${lora_dropout}  # Dropout rate for LoRA layers
+    lora_bias: ${lora_bias}  # How to handle bias terms in LoRA
+    model_type: ~  # Auto-detect model type from pretrained config
+  training_args:
+    lr_scheduler_type: cosine_with_min_lr  # Learning rate schedule (cosine decay with minimum LR)
+    learning_rate: 1e-6  # Peak learning rate
+    weight_decay: 0.05  # L2 regularization coefficient
+    adam_beta1: 0.9  # Adam optimizer beta1 (momentum)
+    adam_beta2: 0.95  # Adam optimizer beta2 (RMSprop-like)
+    per_device_train_batch_size: 1  # Batch size per GPU for training
+    gradient_accumulation_steps: 4  # Accumulate gradients over N steps (effective_batch = per_device * accum * num_gpus)
+    warmup_steps: 10  # Number of warmup steps for learning rate
+  data_args:
+    template: qwen3
+  # strategy_args:
+  #   strategy_name: megatron_train
+  #   strategy_config:
+  #     sequence_parallel: true
+  #     tensor_model_parallel_size: 2
+  #     pipeline_model_parallel_size: 1
+  #     expert_model_parallel_size: 1
+  #     use_distributed_optimizer: true
+  #     recompute_granularity: full
+  #     accumulate_allreduce_grads_in_fp32: true
+  #     check_for_nan_in_loss_and_grad: false
+  strategy_args:
+    strategy_name: deepspeed_train
+    strategy_config: ${deepspeed_zero3}
+  device_mapping: list(range(0,2))
+  infer_batch_size: 2
+
+actor_infer:
+  model_args:
+    flash_attn: fa2  # Use Flash Attention 2 for fast inference
+    disable_gradient_checkpointing: true  # Disable for inference (not needed, saves compute)
+    dtype: bf16  # Use bfloat16 for inference
+    lora_target: ${lora_target}
+    lora_rank: ${lora_rank}
+    lora_alpha: ${lora_alpha}
+  generating_args:
+    max_new_tokens: 4096  # Maximum tokens to generate per turn (must fit within sequence_length)
+    top_p: 0.99  # Nucleus sampling: sample from top tokens with cumulative probability p
+    top_k: 100  # Top-k sampling: consider only top k tokens
+    num_beams: 1  # Beam search width (1 = greedy/sampling, >1 = beam search)
+    temperature: 0.6  # Sampling temperature (lower = more deterministic, higher = more random)
+    num_return_sequences: 1  # Number of sequences to generate per prompt
+  data_args:
+    template: qwen3  # Chat template format for the model
+  strategy_args:
+    strategy_name: vllm  # Use vLLM for fast batched inference
+    strategy_config:
+      gpu_memory_utilization: 0.45  # Fraction of GPU memory to use for KV cache (0.0-1.0)
+      block_size: 16  # Size of KV cache blocks (smaller = less memory waste, but more overhead)
+      load_format: auto  # Model loading format (auto/safetensors/pt)
+  device_mapping: list(range(0,2))  # Map to GPUs 0 and 1
+
+reference:
+  model_args:
+    flash_attn: fa2
+    disable_gradient_checkpointing: true
+    dtype: bf16
+    model_type: ~
+  data_args:
+    template: qwen3
+  strategy_args:
+    strategy_name: hf_infer
+    strategy_config: ~
+  device_mapping: list(range(0,2))
+  infer_batch_size: 2
+
+enable_response_mask: True  # Mask loss for non-response tokens (only train on model's outputs)
+action_sep: "||"  # Separator between multiple actions in a single turn
+use_turn_scores: True  # Apply rewards at each turn boundary (True) vs only at final token (False). Important for multi-turn credit assignment.
+enable_think: True  # Allow model to generate <think> reasoning before actions (False = no thinking, direct action only)
+max_actions_per_traj: 50  # Maximum number of actions allowed per trajectory
+reward_normalization:
+  grouping: tags  # Group trajectories for normalization: "tags" (by env type), "batch" (all together), "traj_group_id" (by group), "state" (by game state)
+  method: mean  # Normalization method: "mean" (zero-mean), "mean_std" (z-score), "asym_clip" (clip asymmetrically), "identity" (no norm)
+  separate_norm_for_selfplay: true  # Normalize player 0 and player 1 rewards separately in self-play
+whiten_rewards: true  # Normalize rewards to zero mean before computing advantages
+advantage_norm: mean  # Normalize unique advantage values: "mean" (zero-mean) or None
+# loss_agg_mode: token-mean  # How to aggregate loss: "token-mean" (per token) or "sample-mean" (per trajectory)
+pg_clip_high: 0.20  # Upper clip threshold for dual-clip PPO loss
+
+custom_envs:
+  TicTacToe-first-100:
+    env_type: tictactoe
+    max_actions_per_traj: ${max_actions_per_traj}
+    grid_vocab: false
+    env_config:
+      built_in_opponent: mcts
+      render_mode: text
+
+  TicTacToe-second-100:
+    env_type: tictactoe
+    max_actions_per_traj: ${max_actions_per_traj}
+    grid_vocab: false
+    env_config:
+      built_in_opponent: mcts
+      opponent_player: 0
+      render_mode: text
+
+  TicTacToe-first-1000:
+    env_type: tictactoe
+    max_actions_per_traj: ${max_actions_per_traj}
+    grid_vocab: false
+    env_config:
+      built_in_opponent: mcts
+      max_simulations: 1000
+      render_mode: text
+
+  TicTacToe-second-1000:
+    env_type: tictactoe
+    max_actions_per_traj: ${max_actions_per_traj}
+    grid_vocab: false
+    env_config:
+      built_in_opponent: mcts
+      opponent_player: 0
+      max_simulations: 1000
+      render_mode: text
+
+  Connect4-first-100:
+    env_type: connect_four
+    max_actions_per_traj: ${max_actions_per_traj}
+    grid_vocab: false
+    env_config:
+      built_in_opponent: mcts
+      render_mode: text
+
+  Connect4-second-100:
+    env_type: connect_four
+    max_actions_per_traj: ${max_actions_per_traj}
+    grid_vocab: false
+    env_config:
+      built_in_opponent: mcts
+      opponent_player: 0
+      render_mode: text
+
+  Connect4-first-1000:
+    env_type: connect_four
+    max_actions_per_traj: ${max_actions_per_traj}
+    grid_vocab: false
+    env_config:
+      built_in_opponent: mcts
+      max_simulations: 1000
+      render_mode: text
+
+  Connect4-second-1000:
+    env_type: connect_four
+    max_actions_per_traj: ${max_actions_per_traj}
+    grid_vocab: false
+    env_config:
+      built_in_opponent: mcts
+      opponent_player: 0
+      max_simulations: 1000
+      render_mode: text
+
+  KuhnPoker-first:
+    env_type: kuhn_poker
+    max_actions_per_traj:  ${max_actions_per_traj}
+    grid_vocab: false
+    env_config:
+      built_in_opponent: cfr
+      render_mode: text
+
+  KuhnPoker-second:
+    env_type: kuhn_poker
+    max_actions_per_traj:  ${max_actions_per_traj}
+    grid_vocab: false
+    env_config:
+      built_in_opponent: cfr
+      opponent_player: 0
+      render_mode: text
+
+  LeducPoker-first:
+    env_type: leduc_poker
+    max_actions_per_traj:  ${max_actions_per_traj}
+    grid_vocab: false
+    env_config:
+      built_in_opponent: ne
+      render_mode: text
+
+  LeducPoker-second:
+    env_type: leduc_poker
+    max_actions_per_traj:  ${max_actions_per_traj}
+    grid_vocab: false
+    env_config:
+      built_in_opponent: ne
+      opponent_player: 0
+      render_mode: text
+
+  MiniHanabi:
+    env_type: hanabi
+    max_actions_per_traj:  ${max_actions_per_traj}
+    grid_vocab: false
+    env_config:
+      render_mode: text
+
+  SimpleHanabi:
+    env_type: hanabi
+    max_actions_per_traj:  ${max_actions_per_traj}
+    grid_vocab: false
+    env_config:
+      render_mode: text
+      colors: 3
+      ranks: 2
+      hand_size: 5
+      max_information_tokens: 8
+      max_life_tokens: 3
+      
+  FullHanabi:
+    env_type: hanabi
+    max_actions_per_traj:  ${max_actions_per_traj}
+    grid_vocab: false
+    env_config:
+      render_mode: text
+      colors: 3
+      ranks: 3
+      hand_size: 5
+      max_information_tokens: 8
+      max_life_tokens: 3
+
+train_env_manager:
+  format_penalty: 0.05  # Penalty for malformed actions (e.g., invalid format). Sokoban uses -0.1 per step.
+  max_env_num_per_worker: 16  # Maximum parallel environments per worker actor (higher = more parallelism, more memory)
+  env_groups: 16  # Number of Ray actor workers to spawn for training rollouts
+  # under the same group, the env config and env seed are ensured to be equal
+  group_size: 1  # Number of environments per group (for GRPO-style group normalization, set >1)
+  tags: [MiniHanabi]  # Which environments to use for training (references custom_envs keys)
+  n_groups: [16]  # How many groups for each environment tag. If not set, divides evenly. Total envs = sum(n_groups) * group_size
+
+val_env_manager:
+  max_env_num_per_worker: 8  # Parallel environments per validation worker (can be lower than training)
+  env_groups: 8  # Number of validation worker actors (fewer than training is typical)
+  group_size: 1
+  tags: [
+    MiniHanabi  # Environment(s) to use for validation
+  ]
+  n_groups: [8]  # Number of groups for validation. Total validation envs = sum(n_groups) * group_size
