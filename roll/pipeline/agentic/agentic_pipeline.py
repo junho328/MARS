@@ -165,8 +165,8 @@ class AgenticPipeline(BasePipeline):
                                 "llm_raw_text": llm_raw_text,
                             }
                         )
-                    logger.info(f"Printing 10 items of eval_batch:")
-                    logger.info(json.dumps(generate_res[:10], ensure_ascii=False))
+                    logger.info(f"Printing 1 items of eval_batch:")
+                    logger.info(json.dumps(generate_res[:1], ensure_ascii=False))
 
                     if self.pipeline_config.render_save_dir:
                         self.executor.submit(
@@ -364,8 +364,8 @@ class AgenticPipeline(BasePipeline):
                             "llm_raw_text": llm_raw_text,
                         }
                     )
-                logger.info(f"Printing 10 items of training_batch:")
-                logger.info(json.dumps(generate_res[:10], ensure_ascii=False))
+                logger.info(f"Printing 1 items of training_batch:")
+                logger.info(json.dumps(generate_res[:1], ensure_ascii=False))
                 logger.info(json.dumps(metrics, ensure_ascii=False))
 
             logger.info(f"pipeline step {global_step} finished")
