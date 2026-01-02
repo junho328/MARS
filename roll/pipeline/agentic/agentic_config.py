@@ -15,6 +15,21 @@ from roll.utils.logging import get_logger
 
 logger = get_logger()
 
+@dataclass
+class MicrostepConfig:
+    """Configuration for microstep (turn-level) return-to-go computation."""
+    level: Literal["turn", "action", "token"] = field(
+        default="turn",
+        metadata={"help": "Granularity level for return computation: 'turn' (aggregate at turn boundaries), 'action' (per action), 'token' (per token)"}
+    )
+    cross_trajectory: bool = field(
+        default=False,
+        metadata={"help": "Enable cross-trajectory return propagation in multi-agent self-play (Player 1's turn t+1 affects Player 0's turn t)"}
+    )
+    aggregation_method: Literal["sum", "mean", "max"] = field(
+        default="sum",
+        metadata={"help": "Method to aggregate token-level rewards within each turn: 'sum' (add all), 'mean' (average), 'max' (maximum)"}
+    )
 
 @dataclass
 class RewardNormalizationConfig:
@@ -159,8 +174,12 @@ class AgenticConfig(BaseConfig):
         },
     )
     advantage_clip: float = field(default=None, metadata={"help": "advantage_clip value"})
-    adv_estimator: Literal["gae", "reinforce", "grpo"] = field(
-        default="gae", metadata={"help": "advantage estimator: gae (GAE)."}
+    adv_estimator: Literal["gae", "reinforce", "grpo", "microstep", "microstep_multiagent"] = field(
+        default="gae", metadata={"help": "advantage estimator: gae (GAE), reinforce (REINFORCE), grpo (GRPO), microstep (turn-level), microstep_multiagent (cross-trajectory)"}
+    )
+    microstep_config: MicrostepConfig = field(
+        default_factory=MicrostepConfig,
+        metadata={"help": "Configuration for microstep return computation (only used when adv_estimator='microstep' or 'microstep_multiagent')"}
     )
     reward_norm: Literal["batch", "group", "running", None] = field(
         default=None,

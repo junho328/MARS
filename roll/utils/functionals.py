@@ -410,6 +410,261 @@ def compute_reinforce_return(token_level_rewards: torch.Tensor, gamma: torch.Ten
     return advantages, returns
 
 
+def compute_microstep_return(
+    token_level_rewards: torch.Tensor,
+    turn_end_positions: torch.Tensor,
+    gamma: float,
+    lambd: float = None,
+):
+    """
+    Compute turn-level (microstep) return-to-go for multi-agent GRPO.
+    
+    This aggregates token-level rewards to turn boundaries and computes returns
+    at turn granularity, providing cleaner credit assignment than token-level computation.
+    
+    Algorithm:
+    1. Aggregate token-level rewards within each turn to get turn_level_rewards
+    2. Compute return-to-go at turn boundaries: G_turn_t = r_turn_t + gamma * G_turn_{t+1}
+    3. Broadcast turn-level returns back to all tokens within that turn
+    
+    Example:
+        Token rewards:    [0, 0, 5, 0, 0, 0, 10, 0]
+        Turn boundaries:  [0, 0, 1, 0, 0, 0, 1,  0]  (1 marks turn end)
+        Turn rewards:     [5, 10]
+        Turn returns:     [5 + gamma*10, 10]
+        Broadcasted:      [5+10g, 5+10g, 5+10g, 10, 10, 10, 10, 10]
+    
+    Args:
+        token_level_rewards: Rewards at each token, shape (batch_size, seq_len)
+        turn_end_positions: Boolean mask marking turn boundaries, shape (batch_size, seq_len)
+        gamma: Discount factor (typically 1.0 for undiscounted multi-agent scenarios)
+        lambd: Not used (kept for API compatibility)
+        
+    Returns:
+        advantages: Turn-level return-to-go broadcasted to token level, shape (batch_size, seq_len)
+        returns: Same as advantages (no baseline subtraction)
+    """
+    with torch.no_grad():
+        batch_size, seq_len = token_level_rewards.shape
+        advantages = torch.zeros_like(token_level_rewards)
+        
+        for batch_idx in range(batch_size):
+            # Find turn end positions for this trajectory
+            turn_ends = torch.where(turn_end_positions[batch_idx])[0].cpu().numpy()
+            
+            if len(turn_ends) == 0:
+                # No turns identified, fall back to token-level computation
+                advantages_reversed = []
+                cumulative_reward = 0
+                for t in reversed(range(seq_len)):
+                    local_reward = token_level_rewards[batch_idx, t]
+                    cumulative_reward = local_reward + gamma * cumulative_reward
+                    advantages_reversed.append(cumulative_reward)
+                advantages[batch_idx] = torch.stack(advantages_reversed[::-1])
+                continue
+            
+            # Step 1: Aggregate rewards at turn level
+            turn_rewards = []
+            prev_end = -1
+            for turn_end in turn_ends:
+                # Sum rewards from prev_end+1 to turn_end (inclusive)
+                turn_reward = token_level_rewards[batch_idx, prev_end + 1 : turn_end + 1].sum()
+                turn_rewards.append(turn_reward)
+                prev_end = turn_end
+            
+            # Step 2: Compute return-to-go at turn level
+            num_turns = len(turn_rewards)
+            turn_returns = torch.zeros(num_turns, device=token_level_rewards.device)
+            cumulative_return = 0.0
+            for turn_idx in reversed(range(num_turns)):
+                cumulative_return = turn_rewards[turn_idx] + gamma * cumulative_return
+                turn_returns[turn_idx] = cumulative_return
+            
+            # Step 3: Broadcast turn-level returns back to tokens
+            prev_end = -1
+            for turn_idx, turn_end in enumerate(turn_ends):
+                start_idx = prev_end + 1
+                end_idx = turn_end + 1
+                # Assign the turn's return to all tokens in this turn
+                advantages[batch_idx, start_idx:end_idx] = turn_returns[turn_idx]
+                prev_end = turn_end
+        
+        returns = advantages
+    return advantages, returns
+
+
+def compute_multiagent_microstep_return(
+    data: "DataProto",
+    token_level_rewards: torch.Tensor,
+    turn_end_positions: torch.Tensor,
+    gamma: float,
+    lambd: float = None,
+):
+    """
+    Compute cross-trajectory return-to-go for multi-agent self-play.
+    
+    This interleaves player trajectories to compute returns considering both agents'
+    future actions, enabling proper multi-agent credit assignment. Player 0's turn t
+    return considers Player 1's turn t+1 action.
+    
+    Algorithm:
+    1. Group trajectories by traj_group_id (removing player suffix)
+    2. For each group, identify player_0 and player_1 trajectories
+    3. Interleave turns from both players in chronological order
+    4. Compute return-to-go across the interleaved sequence
+    5. Split returns back to per-player trajectories
+    
+    Example (2-turn game):
+        P0 turn 0 -> P1 turn 0 -> P0 turn 1 -> P1 turn 1
+        Rewards:  r0_0    r1_0      r0_1       r1_1
+        Returns:  G0_0    G1_0      G0_1       G1_1
+        where G0_0 = r0_0 + gamma*(r1_0 + gamma*(r0_1 + gamma*r1_1))
+    
+    Args:
+        data: DataProto containing traj_group_id and group_ids for trajectory pairing
+        token_level_rewards: Rewards at each token, shape (batch_size, seq_len)
+        turn_end_positions: Boolean mask marking turn boundaries, shape (batch_size, seq_len)
+        gamma: Discount factor
+        lambd: Not used (kept for API compatibility)
+        
+    Returns:
+        advantages: Cross-trajectory return-to-go, shape (batch_size, seq_len)
+        returns: Same as advantages
+    """
+    with torch.no_grad():
+        batch_size, seq_len = token_level_rewards.shape
+        advantages = torch.zeros_like(token_level_rewards)
+        
+        # Extract trajectory group information
+        traj_group_ids = data.non_tensor_batch.get("traj_group_id", [])
+        if len(traj_group_ids) == 0:
+            # Fall back to single-trajectory microstep if no grouping info
+            return compute_microstep_return(token_level_rewards, turn_end_positions, gamma, lambd)
+        
+        # Group trajectories by base group_id (remove player suffix)
+        group_map = {}  # base_group_id -> {player_id -> batch_idx}
+        for batch_idx in range(batch_size):
+            if batch_idx >= len(traj_group_ids):
+                continue
+            traj_id = traj_group_ids[batch_idx]
+            
+            # Extract base group and player ID
+            if isinstance(traj_id, str) and "_p" in traj_id:
+                parts = traj_id.split("_p")
+                base_group = parts[0]
+                player_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+            else:
+                base_group = str(traj_id)
+                player_id = 0
+            
+            if base_group not in group_map:
+                group_map[base_group] = {}
+            group_map[base_group][player_id] = batch_idx
+        
+        # Process each group
+        processed_indices = set()
+        for base_group, player_indices in group_map.items():
+            if len(player_indices) < 2:
+                # Single player or incomplete pair, use regular microstep
+                for player_id, batch_idx in player_indices.items():
+                    if batch_idx not in processed_indices:
+                        adv, _ = compute_microstep_return(
+                            token_level_rewards[batch_idx:batch_idx+1],
+                            turn_end_positions[batch_idx:batch_idx+1],
+                            gamma, lambd
+                        )
+                        advantages[batch_idx] = adv[0]
+                        processed_indices.add(batch_idx)
+                continue
+            
+            # Get player indices
+            p0_idx = player_indices.get(0)
+            p1_idx = player_indices.get(1)
+            
+            if p0_idx is None or p1_idx is None:
+                # Incomplete pair, process individually
+                for player_id, batch_idx in player_indices.items():
+                    if batch_idx not in processed_indices:
+                        adv, _ = compute_microstep_return(
+                            token_level_rewards[batch_idx:batch_idx+1],
+                            turn_end_positions[batch_idx:batch_idx+1],
+                            gamma, lambd
+                        )
+                        advantages[batch_idx] = adv[0]
+                        processed_indices.add(batch_idx)
+                continue
+            
+            # Interleave turns from both players
+            p0_turns = extract_turns(token_level_rewards[p0_idx], turn_end_positions[p0_idx])
+            p1_turns = extract_turns(token_level_rewards[p1_idx], turn_end_positions[p1_idx])
+            
+            # Compute interleaved returns
+            interleaved_rewards = []
+            turn_player_mapping = []  # Track which player owns each turn
+            
+            for turn_idx in range(max(len(p0_turns), len(p1_turns))):
+                if turn_idx < len(p0_turns):
+                    interleaved_rewards.append(p0_turns[turn_idx]['reward'])
+                    turn_player_mapping.append((0, turn_idx))
+                if turn_idx < len(p1_turns):
+                    interleaved_rewards.append(p1_turns[turn_idx]['reward'])
+                    turn_player_mapping.append((1, turn_idx))
+            
+            # Compute return-to-go over interleaved sequence
+            num_interleaved_turns = len(interleaved_rewards)
+            interleaved_returns = torch.zeros(num_interleaved_turns, device=token_level_rewards.device)
+            cumulative_return = 0.0
+            for idx in reversed(range(num_interleaved_turns)):
+                cumulative_return = interleaved_rewards[idx] + gamma * cumulative_return
+                interleaved_returns[idx] = cumulative_return
+            
+            # Broadcast returns back to tokens for each player
+            for interleaved_idx, (player_id, turn_idx) in enumerate(turn_player_mapping):
+                batch_idx = p0_idx if player_id == 0 else p1_idx
+                turn_info = p0_turns[turn_idx] if player_id == 0 else p1_turns[turn_idx]
+                start_idx = turn_info['start']
+                end_idx = turn_info['end']
+                advantages[batch_idx, start_idx:end_idx] = interleaved_returns[interleaved_idx]
+            
+            processed_indices.add(p0_idx)
+            processed_indices.add(p1_idx)
+        
+        returns = advantages
+    return advantages, returns
+
+
+def extract_turns(token_rewards: torch.Tensor, turn_end_mask: torch.Tensor):
+    """
+    Helper function to extract turn information from token-level data.
+    
+    Args:
+        token_rewards: Rewards for a single trajectory, shape (seq_len,)
+        turn_end_mask: Turn boundary mask, shape (seq_len,)
+        
+    Returns:
+        List of dicts with 'start', 'end', and 'reward' for each turn
+    """
+    turn_ends = torch.where(turn_end_mask)[0].cpu().numpy()
+    turns = []
+    prev_end = -1
+    
+    for turn_end in turn_ends:
+        start_idx = prev_end + 1
+        end_idx = turn_end + 1
+        turn_reward = token_rewards[start_idx:end_idx].sum()
+        turns.append({
+            'start': start_idx,
+            'end': end_idx,
+            'reward': turn_reward
+        })
+        prev_end = turn_end
+    
+    return turns
+
+
+
+
+
 def compute_gae_advantage_return(
     token_level_rewards: torch.Tensor, values: torch.Tensor, gamma: torch.Tensor, lambd: torch.Tensor
 ):
@@ -846,16 +1101,20 @@ def score_normalize(x, rn_cfg, running_ctrl=None, mask=None) -> torch.Tensor:
 
 
 @torch.no_grad()
-def reward_normalize_by_player(data: "DataProto", rewards: torch.Tensor, rn_cfg, running_ctrl=None, mask=None):
+def reward_normalize_by_player(data: "DataProto", rewards: torch.Tensor, rn_cfg, running_ctrl=None, mask=None, use_turn_level=False):
     """
     Normalize rewards separately for each player in self-play scenarios.
+    
+    When use_turn_level=True, this function operates on turn-level statistics for microstep estimators,
+    normalizing rewards after turn-aggregation but before return-to-go computation.
     
     Args:
         data: DataProto containing trajectory data with group_ids
         rewards: reward tensor to be normalized
         rn_cfg: reward normalization configuration
         running_ctrl: running normalization controller(s) - can be single controller or dict with 'player_0'/'player_1' keys
-        mask: optional mask for the rewards
+        mask: optional mask for the rewards (turn_end_positions for turn-level normalization)
+        use_turn_level: if True, normalize at turn granularity instead of token level
         
     Returns:
         torch.Tensor: normalized rewards with same shape as input
@@ -898,6 +1157,78 @@ def reward_normalize_by_player(data: "DataProto", rewards: torch.Tensor, rn_cfg,
     # Create a copy of rewards to modify
     normalized_rewards = rewards.clone()
     
+    # For turn-level normalization, we need to extract turn-level rewards
+    if use_turn_level and mask is not None:
+        # mask is turn_end_positions in this case
+        turn_end_positions = mask
+        
+        # Normalize player 0's rewards at turn level
+        if len(player_0_indices) > 0:
+            player_0_indices_tensor = torch.tensor(player_0_indices, dtype=torch.long)
+            for idx in player_0_indices_tensor:
+                turn_ends = torch.where(turn_end_positions[idx])[0]
+                if len(turn_ends) == 0:
+                    continue
+                
+                # Extract turn rewards
+                turn_rewards = []
+                prev_end = -1
+                for turn_end in turn_ends:
+                    turn_reward = rewards[idx, prev_end + 1 : turn_end + 1].sum()
+                    turn_rewards.append(turn_reward)
+                    prev_end = turn_end
+                
+                if len(turn_rewards) > 0:
+                    turn_rewards_tensor = torch.stack(turn_rewards)
+                    # Normalize at turn level
+                    normalized_turn_rewards = score_normalize(
+                        turn_rewards_tensor,
+                        rn_cfg=rn_cfg,
+                        running_ctrl=player_0_ctrl,
+                        mask=None
+                    )
+                    
+                    # Broadcast back to tokens
+                    prev_end = -1
+                    for turn_idx, turn_end in enumerate(turn_ends):
+                        normalized_rewards[idx, prev_end + 1 : turn_end + 1] = normalized_turn_rewards[turn_idx]
+                        prev_end = turn_end
+        
+        # Normalize player 1's rewards at turn level
+        if len(player_1_indices) > 0:
+            player_1_indices_tensor = torch.tensor(player_1_indices, dtype=torch.long)
+            for idx in player_1_indices_tensor:
+                turn_ends = torch.where(turn_end_positions[idx])[0]
+                if len(turn_ends) == 0:
+                    continue
+                
+                # Extract turn rewards
+                turn_rewards = []
+                prev_end = -1
+                for turn_end in turn_ends:
+                    turn_reward = rewards[idx, prev_end + 1 : turn_end + 1].sum()
+                    turn_rewards.append(turn_reward)
+                    prev_end = turn_end
+                
+                if len(turn_rewards) > 0:
+                    turn_rewards_tensor = torch.stack(turn_rewards)
+                    # Normalize at turn level
+                    normalized_turn_rewards = score_normalize(
+                        turn_rewards_tensor,
+                        rn_cfg=rn_cfg,
+                        running_ctrl=player_1_ctrl,
+                        mask=None
+                    )
+                    
+                    # Broadcast back to tokens
+                    prev_end = -1
+                    for turn_idx, turn_end in enumerate(turn_ends):
+                        normalized_rewards[idx, prev_end + 1 : turn_end + 1] = normalized_turn_rewards[turn_idx]
+                        prev_end = turn_end
+        
+        return normalized_rewards
+    
+    # Standard token-level normalization
     # Normalize player 0's rewards if any exist
     if len(player_0_indices) > 0:
         player_0_indices_tensor = torch.tensor(player_0_indices, dtype=torch.long)
@@ -942,6 +1273,9 @@ def reward_postprocess_agentic(data: "DataProto", pipeline_config: AgenticConfig
 
     metrics = {"critic/reward_clip_frac": 0.0}
 
+    # Determine if we should use turn-level normalization (for microstep estimators)
+    use_turn_level_norm = pipeline_config.adv_estimator in ["microstep", "microstep_multiagent"]
+
     # 1. normalize (identity/mean/mean_std/asym_clip/running)
     # Check if we should normalize players separately in self-play mode
     if pipeline_config.reward_normalization.separate_norm_for_selfplay:
@@ -950,7 +1284,8 @@ def reward_postprocess_agentic(data: "DataProto", pipeline_config: AgenticConfig
             rewards=rewards, 
             rn_cfg=pipeline_config.reward_normalization,
             running_ctrl=running_ctrl,
-            mask=mask
+            mask=mask,
+            use_turn_level=use_turn_level_norm
         )
     else:
         rewards = score_normalize(
@@ -1110,7 +1445,7 @@ def compute_advantage(
     """
     if response_mask is None:
         response_mask = data.batch["response_mask"][:, 1:]
-
+    # import pdb; pdb.set_trace()
     token_level_rewards = data.batch["token_level_rewards"].float()
     if whiten_rewards:
         token_level_rewards = masked_whiten(values=token_level_rewards, mask=response_mask)
@@ -1132,6 +1467,40 @@ def compute_advantage(
         advantages, returns = compute_reinforce_return(
             token_level_rewards=token_level_rewards, gamma=gamma, lambd=lambd
         )
+    elif adv_estimator == "microstep":
+        # Microstep return-to-go: aggregate rewards at turn level
+        turn_end_positions = data.batch.get("turn_end_positions", None)
+        if turn_end_positions is None:
+            # Fall back to REINFORCE if turn_end_positions not available
+            advantages, returns = compute_reinforce_return(
+                token_level_rewards=token_level_rewards, gamma=gamma, lambd=lambd
+            )
+        else:
+            # Use turn-level return computation
+            turn_end_positions = turn_end_positions[:, 1:]  # Align with response_mask dimensions
+            advantages, returns = compute_microstep_return(
+                token_level_rewards=token_level_rewards,
+                turn_end_positions=turn_end_positions,
+                gamma=gamma,
+                lambd=lambd,
+            )
+    elif adv_estimator == "microstep_multiagent":
+        # Multi-agent microstep: interleave player trajectories for cross-trajectory returns
+        turn_end_positions = data.batch.get("turn_end_positions", None)
+        if turn_end_positions is None:
+            # Fall back to REINFORCE if turn_end_positions not available
+            advantages, returns = compute_reinforce_return(
+                token_level_rewards=token_level_rewards, gamma=gamma, lambd=lambd
+            )
+        else:
+            turn_end_positions = turn_end_positions[:, 1:]  # Align with response_mask dimensions
+            advantages, returns = compute_multiagent_microstep_return(
+                data=data,
+                token_level_rewards=token_level_rewards,
+                turn_end_positions=turn_end_positions,
+                gamma=gamma,
+                lambd=lambd,
+            )
     else:
         raise NotImplementedError
 

@@ -269,6 +269,10 @@ class EnvManager:
                 "frames": [],
                 "is_self_play": is_self_play,
                 "current_player": current_player,
+                # Microstep return-to-go metadata
+                "turn_boundaries": [],  # List of (start_token_idx, end_token_idx) for each turn
+                "turn_player_ids": [],  # Which player acted at each turn
+                "turn_level_rewards": [],  # Aggregated reward for each turn
             }
 
         seed = self.group_seed + self.episode_id
