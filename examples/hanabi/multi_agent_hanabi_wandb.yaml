@@ -25,7 +25,7 @@ system_envs:
 # WandB tracking - following original config
 track_with: wandb
 tracker_kwargs:
-  entity: mars-hanabi-org  # WandB organization/team
+  entity: ~  # Use default WandB user
   project: mars-multi-agent-hanabi
   name: multi_agent_hanabi_${exp_name}
   notes: "Multi-agent Hanabi self-play training with separate LoRA adapters"
@@ -36,19 +36,19 @@ lora_target: q_proj,k_proj,v_proj,o_proj
 lora_rank: 32
 lora_alpha: 32
 
-# GPU configuration
+# GPU configuration - using both GPUs
 num_gpus_per_node: 2
 
 # Training steps - matching original
 max_steps: 200
-save_steps: 20
+save_steps: 12
 logging_steps: 1
 eval_steps: 5
 resume_from_checkpoint: false
 
-# Batch sizes - matching original (reduced for memory)
-rollout_batch_size: 64
-val_batch_size: 96
+# Batch sizes - balanced for stability and performance
+rollout_batch_size: 32
+val_batch_size: 40
 sequence_length: 8192
 
 # PPO/RL parameters - matching original
@@ -62,8 +62,8 @@ kl_loss_coef: 0.20
 whiten_advantages: true
 entropy_loss_coef: 0
 
-# Model - using smaller Qwen3-0.6B for faster testing
-pretrain: Qwen/Qwen3-0.6B
+# Model - using Qwen3-4B
+pretrain: Qwen/Qwen3-4B
 
 actor_train:
   model_args:
@@ -81,14 +81,14 @@ actor_train:
     adam_beta1: 0.9
     adam_beta2: 0.95
     per_device_train_batch_size: 2
-    gradient_accumulation_steps: 2
+    gradient_accumulation_steps: 4
     warmup_steps: 10
   data_args:
     template: qwen3
   strategy_args:
     strategy_name: deepspeed_train
     strategy_config: ${deepspeed_zero2}
-  device_mapping: list(range(0,2))
+  device_mapping: "list(range(0,2))"
   infer_batch_size: 2
 
 actor_infer:
@@ -111,10 +111,10 @@ actor_infer:
   strategy_args:
     strategy_name: vllm
     strategy_config:
-      gpu_memory_utilization: 0.5
+      gpu_memory_utilization: 0.55
       block_size: 16
       load_format: auto
-  device_mapping: list(range(0,2))
+  device_mapping: "list(range(0,2))"
 
 reference:
   model_args:
@@ -127,7 +127,7 @@ reference:
   strategy_args:
     strategy_name: hf_infer
     strategy_config: ~
-  device_mapping: list(range(0,2))
+  device_mapping: "list(range(0,2))"
   infer_batch_size: 2
 
 # Agentic environment settings - matching original
@@ -170,17 +170,17 @@ custom_envs:
 # Training environment manager - matching original structure
 train_env_manager:
   format_penalty: 0.05
-  max_env_num_per_worker: 64
-  env_groups: 64
+  max_env_num_per_worker: 32
+  env_groups: 32
   group_size: 1
   tags: [MiniHanabi]
-  n_groups: [64]
+  n_groups: [32]
 
 # Validation environment manager
 val_env_manager:
-  max_env_num_per_worker: 32
-  env_groups: 64
+  max_env_num_per_worker: 16
+  env_groups: 32
   group_size: 1
   tags: [MiniHanabi, SimpleHanabi]
-  n_groups: [32, 32]
+  n_groups: [16, 16]
 

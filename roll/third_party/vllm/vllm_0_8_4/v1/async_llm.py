@@ -86,8 +86,14 @@ class AsyncLLM084(AsyncLLM):
     def broadcast_parameter(self, *args, **kwargs):
         self.collective_rpc(method="broadcast_parameter", args=args, kwargs=kwargs)
 
-    def update_parameter(self, *args, **kwargs):
-        self.collective_rpc(method="update_parameter", args=args, kwargs=kwargs)
+    def update_parameter(self, parameter_name, weight, ranks_in_worker):
+        if envs.VLLM_USE_V1:
+            # vllm 084 v1 has serialization issues - store shape and convert to flat list
+            weight_shape = weight.shape
+            weight_data = weight.cpu().float().flatten().tolist()
+            # Pack shape and data together
+            weight = {"shape": list(weight_shape), "data": weight_data}
+        self.collective_rpc(method="update_parameter", args=(parameter_name, weight, ranks_in_worker))
 
     def update_parameter_in_bucket(self, meta_infos, buffer, ranks_in_worker):
         if envs.VLLM_USE_V1:

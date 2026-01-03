@@ -56,19 +56,32 @@ class MultiAgentDeepSpeedStrategy(DeepSpeedTrainStrategy):
         This overrides the parent's initialize to inject PEFT adapters
         between model creation and DeepSpeed wrapping.
         """
+        import os
+        
         assert self.ds_config._stage > 0, "deepspeed train only supports zero > 0."
         
         set_seed(seed=self.worker.pipeline_config.seed)
+        
+        # Ray assigns each worker a GPU via CUDA_VISIBLE_DEVICES
+        # Each worker sees its assigned GPU as local device 0
+        # Use LOCAL_RANK=0 for DeepSpeed to use the visible GPU
+        os.environ["LOCAL_RANK"] = "0"
+        
         deepspeed.init_distributed(timeout=timedelta(minutes=self.worker_config.backend_timeout))
-        dist.all_reduce(torch.zeros(1).cuda())
         
         self.worker.rank_info.dp_rank = dist.get_rank()
         self.worker.rank_info.dp_size = dist.get_world_size()
         
+        # Each worker uses local device 0 (Ray makes each worker's GPU visible as device 0)
+        torch.cuda.set_device(0)
+        logger.info(f"Worker rank {self.worker.rank_info.dp_rank}/{self.worker.rank_info.dp_size} using local CUDA device 0")
+        
+        dist.all_reduce(torch.zeros(1).cuda())
+        
         self.tokenizer = default_tokenizer_provider(model_args=self.worker_config.model_args)
         self.processor = default_processor_provider(model_args=self.worker_config.model_args)
         
-        # Get the base model
+        # Get the base model (will use the current CUDA device)
         model = model_provider(
             tokenizer=self.tokenizer, 
             model_args=self.worker_config.model_args, 

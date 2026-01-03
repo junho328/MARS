@@ -25,7 +25,10 @@ except Exception as e:
 
 @contextlib.contextmanager
 def file_lock_context(lock_path: str):
-    temp_lock_path = os.path.join(tempfile.gettempdir(), f"{hashlib.md5(lock_path.encode()).hexdigest()}.lock")
+    # Use user-specific lock directory to avoid permission issues with shared /tmp
+    lock_dir = os.environ.get("MARS_LOCK_DIR", os.path.join(os.path.expanduser("~"), ".cache", "mars_locks"))
+    os.makedirs(lock_dir, exist_ok=True)
+    temp_lock_path = os.path.join(lock_dir, f"{hashlib.md5(lock_path.encode()).hexdigest()}.lock")
     with FileLock(temp_lock_path):
         yield
 
