@@ -76,28 +76,56 @@ def get_masks_and_scores(
     use_turn_scores: bool = False,
 ):
     """
-    input_ids: shape (bsz, seq_len)
-    all_scores: list[list[float], 存储每个env每轮的reward
-    Get loss mask that only learns between <|im_start|>assistant and <|im_end|>. Currently only supports qwen.
-    NOTE: important! This assumes that the input_ids starts with system and then user & assistant in alternative ways
-    NOTE: important! input_ids is left pad
+    Generate masks and score tensors for multi-turn agentic RL training.
+    
+    This function processes tokenized conversations to create:
+    1. non_prompt_mask: Masks out system/user prompts, keeps only assistant responses
+    2. score_tensor: Places rewards at appropriate token positions
+    3. response_mask: Identifies all assistant-generated tokens
+    4. turn_end_positions: Marks the end of each turn (for turn-level credit assignment)
+    
+    Important assumptions:
+    - Input format: system -> user -> assistant -> user -> assistant -> ...
+    - Input is LEFT-PADDED (important for batch processing)
+    - Currently supports Qwen chat format with <|im_start|> and <|im_end|> tokens
+    
+    Args:
+        input_ids: Tokenized conversation, shape (batch_size, seq_len)
+        tokenizer: AutoTokenizer with special tokens (im_start, im_end, assistant)
+        all_scores: list[list[float]] - Rewards for each environment and each turn
+                   Inner list length = number of turns for that environment
+        use_turn_scores: If True, place rewards at each turn boundary;
+                        If False, sum all rewards and place at final token
+    
+    Returns:
+        Tuple of (non_prompt_mask, score_tensor, response_mask, turn_end_positions)
+        - non_prompt_mask: bool (batch_size, seq_len) - True for assistant tokens to train on
+        - score_tensor: float (batch_size, seq_len) - Reward values at appropriate positions
+        - response_mask: bool (batch_size, seq_len) - True for all assistant response tokens
+        - turn_end_positions: bool (batch_size, seq_len) - True at end of each turn
+    
+    TODO:
+        - Add special tokens to config for multi-model support
+        - Support other chat templates (Llama, Mistral, etc.)
     """
     # TODO: special tokens add to config
     assistant_turn_start_tokens = tokenizer.encode("<|im_start|>assistant\n")
     turn_start_token = assistant_turn_start_tokens[0]
     turn_starts = torch.where(input_ids == turn_start_token, 1, 0)
     turn_indicators = torch.cumsum(turn_starts, dim=-1)
-
+    # import pdb; pdb.set_trace()
     response_mask = (turn_indicators % 2 == 1) & (turn_indicators > 1)  # only learns all assistant turns
     non_prompt_mask = turn_indicators > 2  # learns everything after system prompt + user prompts
 
     # turn text: '<|im_start|>assistant\n<answer>Right</answer><|im_end|>'
-    # <|im_start|>assistant\n 应该mask掉才对，保留<|im_end|>
+    # Mask format: '<|im_start|>assistant\n<answer>Right</answer><|im_end|>'
+    # We should mask '<|im_start|>assistant\n' but keep '<|im_end|>' for proper termination
     for idx, scores in enumerate(zip_longest(*all_scores, fillvalue=0)):
         """
+        Turn structure in conversation:
         system, user, assistant, user, assistant, user, assistant
-        1,2,3,3,4,5,6
-        assistant位于第3,5,7...
+        1,     2,    3,         4,    5,         6,    7
+        Assistant turns are at positions 3, 5, 7, ... (odd indices after system)
         """
         turn_indicator = idx * 2 + 3  # 0: pad. 1: system. 2+2n: user. 3+2n: assistant
         turn_start_position = (input_ids == turn_start_token) & (turn_indicators == turn_indicator)
@@ -117,7 +145,7 @@ def get_masks_and_scores(
     reward_token = tokenizer.encode("<|im_end|>")[0]
     score_tensor = torch.zeros_like(input_ids, dtype=torch.float32)
     
-    # 新增：记录每个turn结尾位置的变量
+    # Track end position of each turn (important for turn-level return-to-go computation)
     turn_end_positions = torch.zeros_like(input_ids, dtype=torch.bool)
     
     if use_turn_scores:
@@ -127,13 +155,13 @@ def get_masks_and_scores(
             reward_position = (input_ids == reward_token) & (turn_indicators == turn_indicator)
             # Set the last token of the rows where all positions are False to True
             reward_position[~reward_position.any(dim=-1), -1] = True
-            # 记录当前turn的结尾位置
+            # Record the end position of current turn
             turn_end_positions = turn_end_positions | reward_position
             score_tensor[reward_position] = scores
     else:
         scores = [sum(i) for i in all_scores]
         score_tensor[:, -1] = torch.tensor(scores, dtype=torch.float32)
-        # 在非turn_scores模式下，所有turn的结尾位置都在序列末尾
+        # In non-turn-scores mode, all turn end positions are at the final token of the sequence
         turn_end_positions[:, -1] = True
 
     return non_prompt_mask, score_tensor, response_mask, turn_end_positions
@@ -155,13 +183,18 @@ class EnvManager:
         mode="train",
     ):
         """
-        1. 一个EnvManager持有一个env实例: 执行env.reset, env.step, 管理rollout的状态
-            group trajectory表达: group内的init state一致，依赖env_config 中的seed来控制, 一个group内env 对应episode的seed一致
-            EnvWorker持有多个EnvManager，通过线程的方式实现EnvWorker内部并行
-        2. run_rollout_loop, 持续rollout trajectory, 将done的trajectory回传到output_queue
+        Architecture of EnvManager:
+        
+        1. Each EnvManager holds a single env instance: executes env.reset, env.step, and manages rollout state
+           - Group trajectory representation: all episodes within a group share the same init state, controlled by seed in env_config
+           - Each env within a group corresponds to episodes with consistent seeds
+           - EnvWorker holds multiple EnvManagers, implementing parallel execution within EnvWorker using threads
+        
+        2. run_rollout_loop: continuously rollout trajectories and send completed trajectories back to output_queue
+        
         TODO:
-            1. special tokens add to config
-            2. ray max_concurrency 描述多线程是否会更好？
+            1. Add special tokens to config for better extensibility
+            2. Consider whether ray max_concurrency would better describe multi-threading behavior
         """
         self.logger = get_logger()
         self.worker_config: EnvManagerConfig = worker_config
@@ -182,10 +215,10 @@ class EnvManager:
         self.running = False
         self.use_thread_lock = self.env_config.get(
             "use_thread_lock", True
-        )  # 避免同时执行大量cpu操作, 可以通过env_config配置
+        )  # Avoid executing many CPU operations simultaneously; configurable via env_config
         self.thread_lock = thread_lock if self.use_thread_lock else nullcontext()
         
-        # 新增：保护EnvManager内部状态的锁
+        # Add internal lock to protect EnvManager state (especially for self-play)
         from threading import Lock
         self.internal_lock = Lock()
 
@@ -223,7 +256,7 @@ class EnvManager:
         is_self_play = entry["env"].built_in_opponent == "none"
         current_player = 0 if is_self_play else 1 - entry["env"].opponent_player
         
-        # 使用内部锁保护rollout_cache的初始化
+        # Use internal lock to protect rollout_cache initialization (thread-safe for self-play)
         with self.internal_lock:
             self.rollout_cache = {
                 "env_id": entry["env_id"],
@@ -319,7 +352,7 @@ class EnvManager:
             env_input=env_input,
         )
 
-        # 保护玩家切换操作
+        # Protect player switching operation (critical for self-play consistency)
         if self.rollout_cache['is_self_play']:
             with self.internal_lock:
                 self.rollout_cache["current_player"] = entry["env"].current_player
@@ -356,7 +389,7 @@ class EnvManager:
         lm_output: DataProto = ray.get(self.generate_scheduler.generate_one_request.remote(data=gen_batch))
 
         if lm_output is not None:
-            # 未被abort
+            # Not aborted
             gen_batch.meta_info.pop("generation_config")
             lm_input = lm_input.repeat(repeat_times=generation_config["num_return_sequences"])
             lm_output.union(lm_input)
@@ -364,11 +397,14 @@ class EnvManager:
 
     def run_rollout_loop(self, data: DataProto):
         """
-        1. 每次调用run_rollout_loop,
-            会持续的play episode, 直到收到采集完成的command
-            需要重置seed, 确保每个group的seed一致
-            episode_id 置0
-        seed更新逻辑:
+        Run continuous rollout loop for trajectory collection.
+        
+        1. Each call to run_rollout_loop:
+           - Continuously plays episodes until receiving a collection completion command
+           - Resets seed to ensure consistency within each group
+           - Resets episode_id to 0
+        
+        Seed update logic:
             group_seed = seed + group_seed
             episode_seed = group_seed + episode_id
 
@@ -479,9 +515,12 @@ class EnvManager:
 
     def formulate_rollouts(self):
         """
-        1. 每个env的trajectory 应该是一个rollout
-        2. 每个rollout 应该是一个List[Dict]
-        3. 每个Dict 应该是一个step的信息
+        Formulate rollout trajectories from environment history.
+        
+        Structure:
+        1. Each env's trajectory should be a single rollout
+        2. Each rollout should be a List[Dict]
+        3. Each Dict should contain information for one step
         4. For self-play mode, generate separate trajectories for both players
         
         Returns:
@@ -491,7 +530,7 @@ class EnvManager:
         # print("env_status: ", self.env_entry["status"])
         # print("rollout cache: ", self.rollout_cache)
         
-        # 保护rollout_cache的读取
+        # Protect rollout_cache read access (thread-safe formulation)
         with self.internal_lock:
             if self.rollout_cache["is_self_play"]:
                 # Self-play mode
@@ -576,7 +615,7 @@ class EnvManager:
                 "penalty": torch.Tensor([penalty]),
             }
         )
-        
+        # import pdb; pdb.set_trace()
         # Create trajectory group ID that includes player info for self-play
         env_id = self.rollout_cache["env_id"]
         group_id = self.rollout_cache["group_id"]
@@ -599,7 +638,8 @@ class EnvManager:
         llm_inputs.batch["non_prompt_mask"] = non_prompt_mask
         llm_inputs.batch["response_mask"] = non_prompt_mask
         if self.pipeline_config.enable_response_mask:
-            # 只使用llm的response mask，不包含环境的state
+            # Only use LLM's response mask, excluding environment state tokens
+            # This ensures we only train on the model's generated actions, not observations
             llm_inputs.batch["response_mask"] = response_mask
         first_true_indices = non_prompt_mask.int().argmax(dim=1)
         no_true_mask = ~non_prompt_mask.any(dim=1)
@@ -761,7 +801,7 @@ class EnvManager:
                     'token_left': env_input["token_left"], 
                 })
         
-            # 保护历史记录更新操作
+            # Protect history record update operation (thread-safe history management)
             with self.internal_lock:
                 # Update main history and player-specific histories
                 self._update_player_history(None, num_actions_info, next_state_entry)  # main history only gets state
@@ -897,7 +937,7 @@ class EnvManager:
             else:
                 text += "<answer>"  # force the LLM to answer
 
-        # TODO: 应该没有必要，注意处理mask
+        # TODO: This replacement may not be necessary, pay attention to mask handling
         # TODO: special tokens add to config
         text = text.replace("<|im_end|>\n", "<|im_end|>")
         return [text], [messages]
@@ -910,7 +950,7 @@ class EnvManager:
         )
         match = re.search(pattern, response, re.DOTALL)
         if not match:
-            think_content, action_content, actions = "INVALID", "INVALID", []  # 如何更好的处理invalid response?
+            think_content, action_content, actions = "INVALID", "INVALID", []  # How to better handle invalid responses? Currently mark as INVALID
             # print(f"Invalid response format: {response}")
             # yali: this may be cause potential crash
             # llm_response, actions = response, []
