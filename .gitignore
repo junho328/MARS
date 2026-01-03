@@ -166,4 +166,5 @@ cython_debug/
 .idea/
 log
 # examples
-runs/
+runs/.nfs*
+wandb/
