@@ -14,6 +14,8 @@ from .leduc_poker.config import LeducPokerConfig
 from .leduc_poker.env import LeducPoker
 from .bridge.config import BridgeConfig
 from .bridge.env import Bridge
+from .tiny_bridge.config import TinyBridgeConfig
+from .tiny_bridge.env import TinyBridge
 
 REGISTERED_ENVS = {
     "tictactoe": TicTacToe,
@@ -22,6 +24,7 @@ REGISTERED_ENVS = {
     "kuhn_poker": KuhnPoker,
     "leduc_poker": LeducPoker,
     "bridge": Bridge,
+    "tiny_bridge": TinyBridge,
 }
 
 REGISTERED_ENV_CONFIGS = {
@@ -31,4 +34,5 @@ REGISTERED_ENV_CONFIGS = {
     "kuhn_poker": KuhnPokerConfig,
     "leduc_poker": LeducPokerConfig,
     "bridge": BridgeConfig,
+    "tiny_bridge": TinyBridgeConfig,
 }

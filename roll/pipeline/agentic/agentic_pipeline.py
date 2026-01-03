@@ -128,7 +128,7 @@ class AgenticPipeline(BasePipeline):
                 batch: DataProto = DataProto()
                 batch.meta_info = {"global_step": global_step}
 
-                if global_step % self.pipeline_config.eval_steps == 0:
+                if global_step > 0 and global_step % self.pipeline_config.eval_steps == 0:
                     batch.meta_info["is_offload_states"] = False
                     eval_batch = self.val_rollout_scheduler.get_batch(batch, self.pipeline_config.val_batch_size)
                     eval_metrics = reduce_metrics(eval_batch.meta_info.get("metrics", {}))
@@ -165,8 +165,8 @@ class AgenticPipeline(BasePipeline):
                                 "llm_raw_text": llm_raw_text,
                             }
                         )
-                    logger.info(f"Printing 10 items of eval_batch:")
-                    logger.info(json.dumps(generate_res[:10], ensure_ascii=False))
+                    logger.info(f"Printing 1 items of eval_batch:")
+                    logger.info(json.dumps(generate_res[:1], ensure_ascii=False))
 
                     if self.pipeline_config.render_save_dir:
                         self.executor.submit(
@@ -363,8 +363,8 @@ class AgenticPipeline(BasePipeline):
                             "llm_raw_text": llm_raw_text,
                         }
                     )
-                logger.info(f"Printing 10 items of training_batch:")
-                logger.info(json.dumps(generate_res[:10], ensure_ascii=False))
+                logger.info(f"Printing 1 items of training_batch:")
+                logger.info(json.dumps(generate_res[:1], ensure_ascii=False))
                 logger.info(json.dumps(metrics, ensure_ascii=False))
 
             logger.info(f"pipeline step {global_step} finished")

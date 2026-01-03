@@ -1,0 +1,67 @@
+{
+  "os":  "Linux-5.15.0-140-generic-x86_64-with-glibc2.39",
+  "python":  "CPython 3.11.14",
+  "startedAt":  "2025-12-30T05:55:42.878255Z",
+  "args":  [
+    "--config_path",
+    "tiny_bridge",
+    "--config_name",
+    "agentic_val_tiny_bridge_selfplay"
+  ],
+  "program":  "/home/work/aipr-jhna/MARS/examples/start_agentic_pipeline.py",
+  "codePath":  "examples/start_agentic_pipeline.py",
+  "codePathLocal":  "examples/start_agentic_pipeline.py",
+  "git":  {
+    "remote":  "https://github.com/junho328/MARS.git",
+    "commit":  "d1dfb442e85225ab38c3bb3d33338225dddb558e"
+  },
+  "email":  "jhna@ai.kaist.ac.kr",
+  "root":  "/home/work/aipr-jhna/MARS",
+  "host":  "main1",
+  "executable":  "/home/work/aipr-jhna/miniconda3/envs/mars/bin/python",
+  "cpu_count":  40,
+  "cpu_count_logical":  80,
+  "gpu":  "NVIDIA A100 80GB PCIe",
+  "gpu_count":  4,
+  "disk":  {
+    "/":  {
+      "total":  "1885203066880",
+      "used":  "313723801600"
+    }
+  },
+  "memory":  {
+    "total":  "1081348915200"
+  },
+  "gpu_nvidia":  [
+    {
+      "name":  "NVIDIA A100 80GB PCIe",
+      "memoryTotal":  "85899345920",
+      "cudaCores":  6912,
+      "architecture":  "Ampere",
+      "uuid":  "GPU-67080252-5ae1-09d7-8eee-4ab2f68996f3"
+    },
+    {
+      "name":  "NVIDIA A100 80GB PCIe",
+      "memoryTotal":  "85899345920",
+      "cudaCores":  6912,
+      "architecture":  "Ampere",
+      "uuid":  "GPU-fe05fb64-64fb-36d9-feab-5731c94176f0"
+    },
+    {
+      "name":  "NVIDIA A100 80GB PCIe",
+      "memoryTotal":  "85899345920",
+      "cudaCores":  6912,
+      "architecture":  "Ampere",
+      "uuid":  "GPU-47b4344d-0b45-929c-bfd4-b6d32ed5aca4"
+    },
+    {
+      "name":  "NVIDIA A100 80GB PCIe",
+      "memoryTotal":  "85899345920",
+      "cudaCores":  6912,
+      "architecture":  "Ampere",
+      "uuid":  "GPU-507c8ba2-a0a1-2993-f488-7fcaf1405876"
+    }
+  ],
+  "cudaVersion":  "12.9",
+  "writerId":  "k0uvm81j2ebapb636an2o400n9f20ojb"
+}

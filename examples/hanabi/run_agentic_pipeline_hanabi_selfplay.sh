@@ -7,7 +7,7 @@ CONFIG_PATH=$(basename $(dirname $0))
 ROLL_PATH=${PWD}
 export PYTHONPATH="$ROLL_PATH:$PYTHONPATH"
 
-ROLL_OUTPUT_DIR="/workspace/output/runs/hanabi_selfplay/$(date +%Y%m%d-%H%M%S)"
+ROLL_OUTPUT_DIR="/home/work/aipr-jhna/output/runs/hanabi_selfplay/$(date +%Y%m%d-%H%M%S)"
 ROLL_LOG_DIR=$ROLL_OUTPUT_DIR/logs
 ROLL_RENDER_DIR=$ROLL_OUTPUT_DIR/render
 export ROLL_OUTPUT_DIR=$ROLL_OUTPUT_DIR

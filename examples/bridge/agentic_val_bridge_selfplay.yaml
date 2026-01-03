@@ -13,7 +13,7 @@ hydra:
     dir: .
   output_subdir: null
 
-exp_name: "agentic_pipeline"
+exp_name: bridge_selfplay
 seed: 42
 logging_dir: /home/work/aipr-jhna/output/mars/exps/${exp_name}/output/logs
 output_dir: /home/work/aipr-jhna/output/mars/exps/${exp_name}/output
@@ -24,10 +24,11 @@ system_envs:
 
 track_with: wandb
 tracker_kwargs:
+ api_key: 4f27a301fcc24e0267973277fc29e90b1c78064b
  project: mars-bridge-train
  name: bridge_train_${exp_name}
  notes: "Bridge self-play train with random opponent"
- dir: /workspace/output/mars/exps/${exp_name}/output/logs
+ dir: /home/work/aipr-jhna/output/mars/exps/${exp_name}/output/logs
 
 # track_with: tensorboard
 # tracker_kwargs:
@@ -39,10 +40,10 @@ lora_alpha: 32
 lora_dropout: 0.0
 lora_bias: "none"
 
-num_gpus_per_node: 2
+num_gpus_per_node: 4
 
-max_steps: 200
-save_steps: 20
+max_steps: 50
+save_steps: 10
 logging_steps: 1
 eval_steps: 5
 resume_from_checkpoint: false
@@ -65,7 +66,7 @@ kl_loss_coef: 0.20
 whiten_advantages: true
 entropy_loss_coef: 0
 
-pretrain: Qwen/Qwen3-4B
+pretrain: /home/work/aipr-jhna/huggingface_hub/Qwen3-4B
 
 actor_train:
   model_args:
@@ -103,7 +104,7 @@ actor_train:
   strategy_args:
     strategy_name: deepspeed_train
     strategy_config: ${deepspeed_zero3}
-  device_mapping: list(range(0,2))
+  device_mapping: list(range(0,4))
   infer_batch_size: 2
 
 actor_infer:
@@ -129,7 +130,7 @@ actor_infer:
       gpu_memory_utilization: 0.8
       block_size: 16
       load_format: auto
-  device_mapping: list(range(0,2))
+  device_mapping: list(range(0,4))
 
 reference:
   model_args:

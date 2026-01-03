@@ -673,6 +673,11 @@ class EnvManager:
             history_key = "history"
         else:
             history_key = f"player_{player_id}_history"
+
+        # Some environments may have more than two players; lazily
+        # create per-player history buffers to avoid KeyErrors.
+        if history_key not in self.rollout_cache:
+            self.rollout_cache[history_key] = []
         
         self._update_cache_history(
             self.rollout_cache[history_key],
@@ -764,11 +769,18 @@ class EnvManager:
                 
                 # Update opponent's history with reward and info
                 opponent_player = 1 - current_player
-                if len(self.rollout_cache[f"player_{opponent_player}_history"]) > 0:
-                    self._update_player_history(opponent_player, {
-                        "reward": turn['rewards'][opponent_player],
-                        "info": turn['info'],
-                    }, None)
+                opponent_key = f"player_{opponent_player}_history"
+                if opponent_key not in self.rollout_cache:
+                    self.rollout_cache[opponent_key] = []
+                if len(self.rollout_cache[opponent_key]) > 0:
+                    self._update_player_history(
+                        opponent_player,
+                        {
+                            "reward": turn['rewards'][opponent_player],
+                            "info": turn['info'],
+                        },
+                        None,
+                    )
                 
                 # If episode continues, give next player the next state
                 if not self.env_entry["status"].terminated and not self.env_entry["status"].truncated:
