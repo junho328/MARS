@@ -1,0 +1,603 @@
+_wandb:
+    value:
+        cli_version: 0.23.1
+        e:
+            d0d1m547lpbz5ok1kys7ejs7w5fx7uml:
+                args:
+                    - --config_path
+                    - tiny_bridge
+                    - --config_name
+                    - agentic_val_tiny_bridge_selfplay
+                codePath: examples/start_agentic_pipeline.py
+                codePathLocal: examples/start_agentic_pipeline.py
+                cpu_count: 40
+                cpu_count_logical: 80
+                cudaVersion: "12.9"
+                disk:
+                    /:
+                        total: "1885203066880"
+                        used: "313743417344"
+                email: jhna@ai.kaist.ac.kr
+                executable: /home/work/aipr-jhna/miniconda3/envs/mars/bin/python
+                git:
+                    commit: d1dfb442e85225ab38c3bb3d33338225dddb558e
+                    remote: https://github.com/junho328/MARS.git
+                gpu: NVIDIA A100 80GB PCIe
+                gpu_count: 4
+                gpu_nvidia:
+                    - architecture: Ampere
+                      cudaCores: 6912
+                      memoryTotal: "85899345920"
+                      name: NVIDIA A100 80GB PCIe
+                      uuid: GPU-67080252-5ae1-09d7-8eee-4ab2f68996f3
+                    - architecture: Ampere
+                      cudaCores: 6912
+                      memoryTotal: "85899345920"
+                      name: NVIDIA A100 80GB PCIe
+                      uuid: GPU-fe05fb64-64fb-36d9-feab-5731c94176f0
+                    - architecture: Ampere
+                      cudaCores: 6912
+                      memoryTotal: "85899345920"
+                      name: NVIDIA A100 80GB PCIe
+                      uuid: GPU-47b4344d-0b45-929c-bfd4-b6d32ed5aca4
+                    - architecture: Ampere
+                      cudaCores: 6912
+                      memoryTotal: "85899345920"
+                      name: NVIDIA A100 80GB PCIe
+                      uuid: GPU-507c8ba2-a0a1-2993-f488-7fcaf1405876
+                host: main1
+                memory:
+                    total: "1081348915200"
+                os: Linux-5.15.0-140-generic-x86_64-with-glibc2.39
+                program: /home/work/aipr-jhna/MARS/examples/start_agentic_pipeline.py
+                python: CPython 3.11.14
+                root: /home/work/aipr-jhna/MARS
+                startedAt: "2025-12-30T06:27:29.412887Z"
+                writerId: d0d1m547lpbz5ok1kys7ejs7w5fx7uml
+        m: []
+        python_version: 3.11.14
+        t:
+            "1":
+                - 1
+                - 11
+                - 30
+                - 41
+                - 49
+                - 50
+                - 51
+                - 71
+                - 84
+                - 98
+                - 105
+            "2":
+                - 1
+                - 11
+                - 30
+                - 41
+                - 49
+                - 50
+                - 51
+                - 71
+                - 84
+                - 98
+                - 105
+            "3":
+                - 13
+                - 61
+            "4": 3.11.14
+            "5": 0.23.1
+            "6": 4.51.2
+            "12": 0.23.1
+            "13": linux-x86_64
+action_sep:
+    value: '||'
+actor_infer:
+    value:
+        backend_timeout: 30
+        data_args:
+            domain_interleave_probs: null
+            eval_file_name: null
+            file_name: null
+            messages: null
+            preprocessing_num_workers: null
+            prompt: null
+            template: qwen3
+        device_mapping:
+            - 0
+            - 1
+            - 2
+            - 3
+        generating_args:
+            do_sample: true
+            length_penalty: 1
+            max_length: 512
+            max_new_tokens: 4096
+            num_beams: 1
+            num_return_sequences: 1
+            repetition_penalty: 1
+            temperature: 0.6
+            top_k: 100
+            top_p: 0.99
+        infer_batch_size: 16
+        model_args:
+            attn_implementation: null
+            device_map: balanced
+            disable_gradient_checkpointing: true
+            dtype: bf16
+            freeze_module_prefix: null
+            model_name_or_path: /home/work/aipr-jhna/huggingface_hub/Qwen3-4B
+            model_type: null
+            moe_aux_loss_coef: null
+            num_labels: 1
+        model_update_frequency: 1
+        name: actor_infer
+        num_gpus_per_worker: 1
+        strategy_args:
+            strategy_config:
+                block_size: 16
+                gpu_memory_utilization: 0.3
+                load_format: auto
+            strategy_name: vllm
+        training_args:
+            adam_beta1: 0.9
+            adam_beta2: 0.999
+            bf16: true
+            data_seed: null
+            dataloader_num_workers: 0
+            fp16: false
+            gradient_accumulation_steps: 1
+            learning_rate: 5e-05
+            lr_scheduler_type: linear
+            max_steps: -1
+            num_train_epochs: 1
+            output_dir: /home/work/aipr-jhna/output/runs/tiny_bridge_selfplay/20251230-152651
+            per_device_train_batch_size: 8
+            seed: 42
+            tf32: null
+            warmup_ratio: 0.03
+            warmup_steps: 0
+            weight_decay: 0
+        worker_cls: roll.pipeline.base_worker.ActorWorker
+        world_size: 4
+actor_train:
+    value:
+        backend_timeout: 30
+        data_args:
+            domain_interleave_probs: null
+            eval_file_name: null
+            file_name: null
+            messages: null
+            preprocessing_num_workers: null
+            prompt: null
+            template: qwen3
+        device_mapping:
+            - 0
+            - 1
+            - 2
+            - 3
+        generating_args: null
+        infer_batch_size: 2
+        model_args:
+            attn_implementation: null
+            device_map: balanced
+            disable_gradient_checkpointing: false
+            dtype: bf16
+            freeze_module_prefix: null
+            model_name_or_path: /home/work/aipr-jhna/huggingface_hub/Qwen3-4B
+            model_type: null
+            moe_aux_loss_coef: null
+            num_labels: 1
+        model_update_frequency: 1
+        name: actor_train
+        num_gpus_per_worker: 1
+        strategy_args:
+            strategy_config:
+                bf16:
+                    enabled: true
+                fp16:
+                    enabled: false
+                    hysteresis: 2
+                    initial_scale_power: 16
+                    loss_scale: 0
+                    loss_scale_window: 1000
+                    min_loss_scale: 1
+                train_micro_batch_size_per_gpu: auto
+                zero_optimization:
+                    contiguous_gradients: true
+                    overlap_comm: true
+                    reduce_bucket_size: auto
+                    stage: 3
+                    stage3_gather_16bit_weights_on_model_save: true
+                    stage3_max_live_parameters: 1e+09
+                    stage3_max_reuse_distance: 1e+09
+                    stage3_param_persistence_threshold: auto
+                    stage3_prefetch_bucket_size: auto
+                    sub_group_size: 1e+09
+            strategy_name: deepspeed_train
+        training_args:
+            adam_beta1: 0.9
+            adam_beta2: 0.95
+            bf16: true
+            data_seed: null
+            dataloader_num_workers: 0
+            fp16: false
+            gradient_accumulation_steps: 4
+            learning_rate: 1e-06
+            lr_scheduler_type: cosine_with_min_lr
+            max_steps: -1
+            num_train_epochs: 1
+            output_dir: /home/work/aipr-jhna/output/runs/tiny_bridge_selfplay/20251230-152651
+            per_device_train_batch_size: 1
+            seed: 42
+            tf32: null
+            warmup_ratio: 0.03
+            warmup_steps: 10
+            weight_decay: 0.05
+        worker_cls: roll.pipeline.base_worker.ActorWorker
+        world_size: 4
+add_len_reward:
+    value: false
+add_token_level_kl:
+    value: false
+adv_estimator:
+    value: reinforce
+advantage_clip:
+    value: null
+advantage_norm:
+    value: mean
+alive_check_interval:
+    value: 10
+critic:
+    value:
+        backend_timeout: 30
+        data_args: null
+        device_mapping: null
+        generating_args: null
+        infer_batch_size: 16
+        model_args:
+            attn_implementation: null
+            device_map: balanced
+            disable_gradient_checkpointing: false
+            dtype: bf16
+            freeze_module_prefix: null
+            model_name_or_path: null
+            model_type: null
+            moe_aux_loss_coef: null
+            num_labels: 1
+        model_update_frequency: 1
+        name: critic
+        num_gpus_per_worker: 0
+        strategy_args: null
+        training_args:
+            adam_beta1: 0.9
+            adam_beta2: 0.999
+            bf16: true
+            data_seed: null
+            dataloader_num_workers: 0
+            fp16: false
+            gradient_accumulation_steps: 1
+            learning_rate: 5e-05
+            lr_scheduler_type: linear
+            max_steps: -1
+            num_train_epochs: 1
+            output_dir: /home/work/aipr-jhna/output/runs/tiny_bridge_selfplay/20251230-152651
+            per_device_train_batch_size: 8
+            seed: 42
+            tf32: null
+            warmup_ratio: 0.03
+            warmup_steps: 0
+            weight_decay: 0
+        worker_cls: roll.pipeline.base_worker.CriticWorker
+        world_size: null
+critic_warmup:
+    value: 0
+custom_envs:
+    value: '{''TinyBridge'': {''env_type'': ''tiny_bridge'', ''max_actions_per_traj'': 20, ''grid_vocab'': False, ''env_config'': {''built_in_opponent'': ''none'', ''render_mode'': ''text'', ''opponent_player'': 1}}}'
+dual_clip_loss:
+    value: true
+enable_response_mask:
+    value: true
+enable_think:
+    value: true
+entropy_loss_coef:
+    value: 0
+eval_steps:
+    value: 10
+exp_name:
+    value: tiny_bridge_selfplay
+gamma:
+    value: 1
+init_kl_coef:
+    value: 0
+kl_horizon:
+    value: 10000
+kl_loss_coef:
+    value: 0.2
+kl_penalty:
+    value: kl
+l2:
+    value: 0
+lambd:
+    value: 0.95
+local_rank:
+    value: -1
+logging_dir:
+    value: /home/work/aipr-jhna/output/runs/tiny_bridge_selfplay/20251230-152651/logs
+logging_steps:
+    value: 1
+loss_agg_mode:
+    value: seq-mean-token-sum
+max_grad_norm:
+    value: 1
+max_steps:
+    value: 200
+max_steps_per_traj:
+    value: 10
+model_download_type:
+    value: null
+num_gpus_per_node:
+    value: 4
+num_nodes:
+    value: 1
+output_dir:
+    value: /home/work/aipr-jhna/output/runs/tiny_bridge_selfplay/20251230-152651
+pg_clip:
+    value: 0.2
+pg_clip_high:
+    value: 0.2
+ppo_epochs:
+    value: 1
+pretrain:
+    value: /home/work/aipr-jhna/huggingface_hub/Qwen3-4B
+profiler_memory:
+    value: false
+profiler_output_dir:
+    value: /home/work/aipr-jhna/output/runs/tiny_bridge_selfplay/20251230-152651/profiler
+profiler_timeline:
+    value: false
+prompt_length:
+    value: 1024
+reference:
+    value:
+        backend_timeout: 30
+        data_args:
+            domain_interleave_probs: null
+            eval_file_name: null
+            file_name: null
+            messages: null
+            preprocessing_num_workers: null
+            prompt: null
+            template: qwen3
+        device_mapping:
+            - 0
+            - 1
+            - 2
+            - 3
+        generating_args: null
+        infer_batch_size: 2
+        model_args:
+            attn_implementation: null
+            device_map: balanced
+            disable_gradient_checkpointing: true
+            dtype: bf16
+            freeze_module_prefix: null
+            model_name_or_path: /home/work/aipr-jhna/huggingface_hub/Qwen3-4B
+            model_type: null
+            moe_aux_loss_coef: null
+            num_labels: 1
+        model_update_frequency: 1
+        name: reference
+        num_gpus_per_worker: 1
+        strategy_args:
+            strategy_config: null
+            strategy_name: hf_infer
+        training_args:
+            adam_beta1: 0.9
+            adam_beta2: 0.999
+            bf16: true
+            data_seed: null
+            dataloader_num_workers: 0
+            fp16: false
+            gradient_accumulation_steps: 1
+            learning_rate: 5e-05
+            lr_scheduler_type: linear
+            max_steps: -1
+            num_train_epochs: 1
+            output_dir: ""
+            per_device_train_batch_size: 8
+            seed: 42
+            tf32: null
+            warmup_ratio: 0.03
+            warmup_steps: 0
+            weight_decay: 0
+        worker_cls: roll.pipeline.base_worker.ActorWorker
+        world_size: 4
+render_save_dir:
+    value: null
+response_length:
+    value: null
+resume_from_checkpoint:
+    value: false
+reward_clip:
+    value: null
+reward_norm:
+    value: null
+reward_normalization:
+    value:
+        grouping: tags
+        method: mean
+        separate_norm_for_selfplay: true
+reward_pretrain:
+    value: null
+reward_scale:
+    value: false
+reward_shift:
+    value: false
+rollout_batch_size:
+    value: 32
+rpc_timeout:
+    value: 3600
+save_steps:
+    value: 20
+seed:
+    value: 42
+sequence_length:
+    value: 32768
+special_token_list:
+    value:
+        - <think>
+        - </think>
+        - <answer>
+        - </answer>
+        - <|im_start|>
+        - <|im_end|>
+system_envs:
+    value:
+        USE_MODELSCOPE: "1"
+target_kl:
+    value: null
+track_with:
+    value: wandb
+tracker_kwargs:
+    value:
+        api_key: 4f27a301fcc24e0267973277fc29e90b1c78064b
+        dir: /home/work/aipr-jhna/output/mars/exps/tiny_bridge_selfplay/output/logs
+        name: tiny_bridge_train_tiny_bridge_selfplay
+        notes: Tiny Bridge self-play train with random partner
+        project: mars-tiny-bridge-train
+train_env_manager:
+    value:
+        backend_timeout: 30
+        data_args: null
+        device_mapping: null
+        env_groups: 32
+        format_penalty: 0.05
+        generating_args:
+            do_sample: true
+            length_penalty: 1
+            max_length: 512
+            max_new_tokens: 4096
+            num_beams: 1
+            num_return_sequences: 1
+            repetition_penalty: 1
+            temperature: 0.6
+            top_k: 100
+            top_p: 0.99
+        group_size: 1
+        infer_batch_size: 16
+        max_env_num_per_worker: 32
+        max_traj_per_env: 1
+        model_args:
+            attn_implementation: null
+            device_map: balanced
+            disable_gradient_checkpointing: false
+            dtype: bf16
+            freeze_module_prefix: null
+            model_name_or_path: /home/work/aipr-jhna/huggingface_hub/Qwen3-4B
+            model_type: null
+            moe_aux_loss_coef: null
+            num_labels: 1
+        model_update_frequency: 1
+        n_groups:
+            - 32
+        name: train_env
+        num_gpus_per_worker: 1
+        strategy_args: null
+        tags:
+            - TinyBridge
+        training_args:
+            adam_beta1: 0.9
+            adam_beta2: 0.999
+            bf16: false
+            data_seed: null
+            dataloader_num_workers: 0
+            fp16: false
+            gradient_accumulation_steps: 1
+            learning_rate: 5e-05
+            lr_scheduler_type: linear
+            max_steps: -1
+            num_train_epochs: 1
+            output_dir: ""
+            per_device_train_batch_size: 8
+            seed: 42
+            tf32: null
+            warmup_ratio: 0.03
+            warmup_steps: 0
+            weight_decay: 0
+        worker_cls: roll.pipeline.agentic.environment_worker.EnvironmentWorker
+        world_size: 1
+use_kl_loss:
+    value: true
+use_reward_scaling:
+    value: false
+use_turn_scores:
+    value: true
+val_batch_size:
+    value: 32
+val_env_manager:
+    value:
+        backend_timeout: 30
+        data_args: null
+        device_mapping: null
+        env_groups: 16
+        format_penalty: 0
+        generating_args:
+            do_sample: true
+            length_penalty: 1
+            max_length: 512
+            max_new_tokens: 4096
+            num_beams: 1
+            num_return_sequences: 1
+            repetition_penalty: 1
+            temperature: 0.6
+            top_k: 100
+            top_p: 0.99
+        group_size: 1
+        infer_batch_size: 16
+        max_env_num_per_worker: 16
+        max_traj_per_env: 2
+        model_args:
+            attn_implementation: null
+            device_map: balanced
+            disable_gradient_checkpointing: false
+            dtype: bf16
+            freeze_module_prefix: null
+            model_name_or_path: /home/work/aipr-jhna/huggingface_hub/Qwen3-4B
+            model_type: null
+            moe_aux_loss_coef: null
+            num_labels: 1
+        model_update_frequency: 1
+        n_groups:
+            - 16
+        name: val_env
+        num_gpus_per_worker: 1
+        strategy_args: null
+        tags:
+            - TinyBridge
+        training_args:
+            adam_beta1: 0.9
+            adam_beta2: 0.999
+            bf16: false
+            data_seed: null
+            dataloader_num_workers: 0
+            fp16: false
+            gradient_accumulation_steps: 1
+            learning_rate: 5e-05
+            lr_scheduler_type: linear
+            max_steps: -1
+            num_train_epochs: 1
+            output_dir: ""
+            per_device_train_batch_size: 8
+            seed: 42
+            tf32: null
+            warmup_ratio: 0.03
+            warmup_steps: 0
+            weight_decay: 0
+        worker_cls: roll.pipeline.agentic.environment_worker.EnvironmentWorker
+        world_size: 1
+value_clip:
+    value: null
+whiten_advantages:
+    value: true
+whiten_rewards:
+    value: true

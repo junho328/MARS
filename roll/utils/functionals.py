@@ -1056,29 +1056,80 @@ def get_sample_level_mask(data: "DataProto", pipeline_config: RLVRConfig):
     data.batch["final_response_mask"] = final_response_mask
     return data, mask_metrics
 
+# def score_normalize(x, rn_cfg, running_ctrl=None, mask=None) -> torch.Tensor:
+#     grouping, method = rn_cfg.grouping, rn_cfg.method
+#     if method == "identity" or method == "none":
+#         return x
+#     else:
+#         if mask is None:
+#             mean = x.mean()
+#             std = x.std()
+#         else:
+#             mean = masked_mean(x, mask)
+#             var = masked_var(x, mask)
+#             std = torch.sqrt(var)
+
+#     if method == "mean":
+#         x_norm = (x - mean)
+#     elif method == "mean_std":
+#         x_norm = (
+#             (x - mean) / (std + 1e-6)
+#             if std.abs().max() > 1e-6
+#             else torch.zeros_like(x)
+#         )  # stable to bf16 than x.std()
+#     elif method == "asym_clip":
+#         x_norm = (
+#             (x - mean) / (std + 1e-6)
+#             if std.abs().max() > 1e-6
+#             else torch.zeros_like(x)
+#         ).clamp(min=-1, max=3)
+#     elif method == "running" and running_ctrl is not None:
+#         running_ctrl.update(x)
+#         mean = running_ctrl.mean
+#         std = running_ctrl.std
+#         x_norm = (
+#             (x - mean) / (std + 1e-6)
+#             if std.abs().max() > 1e-6
+#             else torch.zeros_like(x)
+#         )
+#     else:
+#         raise ValueError(f"Invalid normalization method: {method}")
+#     if mask is not None:
+#         x_norm = x_norm * mask
+#     return x_norm
 
 def score_normalize(x, rn_cfg, running_ctrl=None, mask=None) -> torch.Tensor:
     grouping, method = rn_cfg.grouping, rn_cfg.method
     if method == "identity" or method == "none":
         return x
+    
+    # mean 계산 (모든 method에서 필요)
+    if mask is None:
+        mean = x.mean()
     else:
-        if mask is None:
-            mean = x.mean()
-            std = x.std()
-        else:
-            mean = masked_mean(x, mask)
-            var = masked_var(x, mask)
-            std = torch.sqrt(var)
-
+        mean = masked_mean(x, mask)
+    
     if method == "mean":
         x_norm = (x - mean)
     elif method == "mean_std":
+        # std가 필요한 경우에만 계산
+        if mask is None:
+            std = x.std()
+        else:
+            var = masked_var(x, mask)
+            std = torch.sqrt(var)
         x_norm = (
             (x - mean) / (std + 1e-6)
             if std.abs().max() > 1e-6
             else torch.zeros_like(x)
         )  # stable to bf16 than x.std()
     elif method == "asym_clip":
+        # std가 필요한 경우에만 계산
+        if mask is None:
+            std = x.std()
+        else:
+            var = masked_var(x, mask)
+            std = torch.sqrt(var)
         x_norm = (
             (x - mean) / (std + 1e-6)
             if std.abs().max() > 1e-6
