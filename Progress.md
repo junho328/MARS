@@ -70,7 +70,61 @@ Note: Using SDPA attention (flash-attn skipped due to CUDA version mismatch).
 
 ## Changelog
 
-### 2025-12-29: Extended Training Run (Latest)
+### 2026-01-07: Odin2 Server Training Setup (Latest)
+
+**Server: odin2 (143.248.158.42)**
+- 3x NVIDIA A100 80GB PCIe GPUs
+- Conda environment: `mars-multi-agent`
+- Cache directories: `/ext_hdd2/nhkoh/.cache/`
+
+**New Training Configs Added:**
+- `examples/hanabi/mars_train_mini_hanabi.yaml` - MARS training on MiniHanabi with per-agent reward normalization
+- `examples/hanabi/pubmdp_train_mini_hanabi.yaml` - PubMDP baseline training
+
+**Config Optimizations for A100 80GB:**
+- Reduced `rollout_batch_size`: 256 -> 128 (to prevent OOM)
+- Reduced `per_device_train_batch_size`: 8 -> 4
+- Increased `gradient_accumulation_steps`: 4 -> 8 (maintain effective batch size)
+- Reduced `reference.infer_batch_size`: 8 -> 2
+- Set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` for memory fragmentation
+
+**Multi-Agent Separate Adapter Training Command:**
+```bash
+cd /ext_hdd/nhkoh/MARS
+source ~/miniconda3/etc/profile.d/conda.sh && conda activate mars-multi-agent
+export PYTHONPATH="${PWD}:$PYTHONPATH"
+export RAY_TMPDIR="/ext_hdd2/nhkoh/.cache/ray"
+
+python examples/start_multi_agent_pipeline.py \
+    --config_path hanabi \
+    --config_name mars_train_mini_hanabi \
+    --num_agents 2 \
+    --lora_rank 32 \
+    --lora_alpha 32 \
+    --training_strategy sequential
+```
+
+**Key Files for Separate Adapter Implementation:**
+| File | Purpose |
+|------|---------|
+| `roll/multi_agent/config.py` | `MultiAgentConfig` - num_agents, LoRA settings |
+| `roll/multi_agent/model.py` | `MultiAgentLoRAModel` - manages per-agent PEFT adapters |
+| `roll/multi_agent/worker.py` | `MultiAgentActorWorker` - partitions batches by agent_id |
+| `roll/multi_agent/pipeline.py` | Creates multi-agent training pipeline |
+| `examples/start_multi_agent_pipeline.py` | Entry point for multi-agent training |
+
+**Architecture:**
+1. Data arrives with group_ids like "env_0_p0", "env_0_p1"
+2. Worker partitions batch by player_id (p0 -> agent_0, p1 -> agent_1)
+3. For each agent:
+   - `set_active_agent(agent_id)` switches LoRA adapter
+   - `freeze_all_adapters_except(agent_id)` ensures gradient isolation
+   - Train on that agent's subset only
+4. Result: Each agent's adapter only learns from its own trajectories
+
+---
+
+### 2025-12-29: Extended Training Run
 - **Active Training Session**
   - Pipeline progressing through steps 7, 8, 9+ continuously
   - Train rollouts completing: 64/64 trajectories per step
