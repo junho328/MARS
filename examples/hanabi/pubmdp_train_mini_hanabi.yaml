@@ -15,7 +15,7 @@ hydra:
     dir: .
   output_subdir: null
 
-exp_name: "pubmdp_mini_hanabi"
+exp_name: "multi_agent_pubmdp_mini_hanabi"
 seed: 42
 logging_dir: /ext_hdd2/nhkoh/mars_runs/${exp_name}/logs
 output_dir: /ext_hdd2/nhkoh/mars_runs/${exp_name}
@@ -29,8 +29,8 @@ system_envs:
 track_with: wandb
 tracker_kwargs:
   project: mars-hanabi
-  name: pubmdp_mini_hanabi
-  notes: "PubMDP training on MiniHanabi with team reward"
+  name: multi_agent_pubmdp_mini_hanabi
+  notes: "PubMDP multi-agent training on MiniHanabi with team reward and separate adapters"
   dir: /ext_hdd2/nhkoh/mars_runs
 
 lora_target: o_proj,q_proj,k_proj,v_proj
@@ -39,14 +39,14 @@ lora_alpha: 32
 
 num_gpus_per_node: 1
 
-max_steps: 200
+max_steps: 50
 save_steps: 20
 logging_steps: 1
 eval_steps: 5
 resume_from_checkpoint: false
 
 rollout_batch_size: 64
-val_batch_size: 32
+val_batch_size: 64
 sequence_length: 32768
 
 dual_clip_loss: true
@@ -76,8 +76,8 @@ actor_train:
     weight_decay: 0.05
     adam_beta1: 0.9
     adam_beta2: 0.95
-    per_device_train_batch_size: 8
-    gradient_accumulation_steps: 4
+    per_device_train_batch_size: 2
+    gradient_accumulation_steps: 16
     warmup_steps: 10
   data_args:
     template: qwen3
@@ -85,7 +85,7 @@ actor_train:
     strategy_name: deepspeed_train
     strategy_config: ${deepspeed_zero2}
   device_mapping: "[0]"
-  infer_batch_size: 8
+  infer_batch_size: 2
 
 actor_infer:
   model_args:
@@ -107,7 +107,7 @@ actor_infer:
   strategy_args:
     strategy_name: vllm
     strategy_config:
-      gpu_memory_utilization: 0.85
+      gpu_memory_utilization: 0.7
       block_size: 16
       load_format: auto
   device_mapping: "[0]"
@@ -124,7 +124,7 @@ reference:
     strategy_name: hf_infer
     strategy_config: ~
   device_mapping: "[0]"
-  infer_batch_size: 8
+  infer_batch_size: 1
 
 enable_response_mask: True
 action_sep: "||"
