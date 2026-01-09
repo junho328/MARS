@@ -257,6 +257,14 @@ class ActorWorker(Worker):
         old_log_probs = data.batch["old_log_probs"]
         advantages = data.batch["advantages"]
 
+        # Safety check: detect NaN/Inf in advantages early
+        if torch.isnan(advantages).any() or torch.isinf(advantages).any():
+            nan_count = torch.isnan(advantages).sum().item()
+            inf_count = torch.isinf(advantages).sum().item()
+            self.logger.error(f"NaN/Inf detected in advantages! NaN: {nan_count}, Inf: {inf_count}")
+            # advantages = torch.where(torch.isfinite(advantages), advantages, torch.zeros_like(advantages))
+            # data.batch["advantages"] = advantages
+
         log_probs = self.strategy.op_compute_log_probs(
             logits=output_tensor, input_ids=data.batch["input_ids"], attention_mask=data.batch["response_mask"]
         )
@@ -300,6 +308,14 @@ class ActorWorker(Worker):
             total_loss = pg_loss
         if self.pipeline_config.entropy_loss_coef > 0:
             total_loss = total_loss - entropy_loss * self.pipeline_config.entropy_loss_coef
+
+        # Safety check: detect NaN/Inf in loss before backward pass
+        if torch.isnan(total_loss) or torch.isinf(total_loss):
+            self.logger.error(f"NaN/Inf in total_loss! pg_loss={pg_loss.item()}, kl_loss={kl_loss.item()}, "
+                             f"ratio_max={ratio.max().item()}, ratio_min={ratio.min().item()}, "
+                             f"adv_max={advantages.max().item()}, adv_min={advantages.min().item()}")
+            # Replace with zero loss to prevent model corruption
+            # total_loss = torch.zeros_like(total_loss)
 
         pg_metrics = {
             "actor/ppo_ratio_high_clipfrac": clipped_high.mean().detach().item(),

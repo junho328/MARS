@@ -446,7 +446,7 @@ def compute_microstep_return(
     """
     with torch.no_grad():
         batch_size, seq_len = token_level_rewards.shape
-        advantages = torch.zeros_like(token_level_rewards)
+        advantages = torch.zeros_like(token_level_rewards)  # (batch_size, seq_len)
         
         for batch_idx in range(batch_size):
             # Find turn end positions for this trajectory
@@ -493,7 +493,7 @@ def compute_microstep_return(
     return advantages, returns
 
 
-def compute_multiagent_microstep_return(
+def compute_cooperative_microstep_return(
     data: "DataProto",
     token_level_rewards: torch.Tensor,
     turn_end_positions: torch.Tensor,
@@ -501,136 +501,207 @@ def compute_multiagent_microstep_return(
     lambd: float = None,
 ):
     """
-    Compute cross-trajectory return-to-go for multi-agent self-play.
+    Compute turn-level return-to-go with turn-position-wise normalization ("Ours" algorithm).
     
-    This interleaves player trajectories to compute returns considering both agents'
-    future actions, enabling proper multi-agent credit assignment. Player 0's turn t
-    return considers Player 1's turn t+1 action.
+    Implements Equation (10) from the paper:
+        A_k^g = (R_k^g - mean(R_k)) / std(R_k)
     
-    Algorithm:
-    1. Group trajectories by traj_group_id (removing player suffix)
-    2. For each group, identify player_0 and player_1 trajectories
-    3. Interleave turns from both players in chronological order
-    4. Compute return-to-go across the interleaved sequence
-    5. Split returns back to per-player trajectories
+    where R_k = {R_k^g1, R_k^g2, ...} is the set of returns at turn position k across all games.
     
-    Example (2-turn game):
-        P0 turn 0 -> P1 turn 0 -> P0 turn 1 -> P1 turn 1
-        Rewards:  r0_0    r1_0      r0_1       r1_1
-        Returns:  G0_0    G1_0      G0_1       G1_1
-        where G0_0 = r0_0 + gamma*(r1_0 + gamma*(r0_1 + gamma*r1_1))
+    Key principle: Normalization only happens when |R_k| > 1. 
+    If a turn position has only 1 return, we cannot normalize (set advantage to 0).
+    
+    Example (3 games, 4 turns each):
+        Rewards: {(1,2,3,4), (5,6,7,8), (9,10,11,12)}
+        Returns: {(10,9,7,4), (26,21,15,8), (42,33,23,12)}
+        
+        Microstep returns grouped by turn k:
+        R_1 = (10, 26, 42) → normalize together (3 values)
+        R_2 = (9, 21, 33) → normalize together (3 values)
+        R_3 = (7, 15, 23) → normalize together (3 values)
+        R_4 = (4, 8, 12) → normalize together (3 values)
     
     Args:
-        data: DataProto containing traj_group_id and group_ids for trajectory pairing
+        data: DataProto containing traj_group_id for trajectory pairing
         token_level_rewards: Rewards at each token, shape (batch_size, seq_len)
         turn_end_positions: Boolean mask marking turn boundaries, shape (batch_size, seq_len)
-        gamma: Discount factor
+        gamma: Discount factor (typically 1.0)
         lambd: Not used (kept for API compatibility)
         
     Returns:
-        advantages: Cross-trajectory return-to-go, shape (batch_size, seq_len)
+        advantages: Turn-position-normalized returns, shape (batch_size, seq_len)
         returns: Same as advantages
     """
     with torch.no_grad():
         batch_size, seq_len = token_level_rewards.shape
-        advantages = torch.zeros_like(token_level_rewards)
+        device = token_level_rewards.device
+        dtype = token_level_rewards.dtype
         
-        # Extract trajectory group information
-        traj_group_ids = data.non_tensor_batch.get("traj_group_id", [])
-        if len(traj_group_ids) == 0:
-            # Fall back to single-trajectory microstep if no grouping info
-            return compute_microstep_return(token_level_rewards, turn_end_positions, gamma, lambd)
+        # Validate input tensors - replace NaN/Inf with zeros
+        if torch.isnan(token_level_rewards).any() or torch.isinf(token_level_rewards).any():
+            token_level_rewards = torch.where(
+                torch.isfinite(token_level_rewards), 
+                token_level_rewards, 
+                torch.zeros_like(token_level_rewards)
+            )
         
-        # Group trajectories by base group_id (remove player suffix)
-        group_map = {}  # base_group_id -> {player_id -> batch_idx}
+        # Initialize advantages to zeros
+        advantages = torch.zeros(batch_size, seq_len, device=device, dtype=dtype)
+        
+        # Get trajectory IDs for pairing
+        traj_ids = data.non_tensor_batch.get("traj_group_id", [])
+        if len(traj_ids) == 0:
+            traj_ids = data.non_tensor_batch.get("group_ids", [])
+        
+        if len(traj_ids) == 0:
+            # No trajectory IDs - fall back to reinforce
+            logger.warning("[compute_cooperative_microstep_return] No trajectory IDs found. "
+                          "Falling back to reinforce.")
+            return compute_reinforce_return(token_level_rewards, gamma, lambd)
+        
+        # STEP 1: Parse trajectory IDs and group by game
+        # game_map: game_id -> {player_id -> batch_idx}
+        game_map = {}
+        
         for batch_idx in range(batch_size):
-            if batch_idx >= len(traj_group_ids):
+            if batch_idx >= len(traj_ids):
                 continue
-            traj_id = traj_group_ids[batch_idx]
+                
+            traj_id = traj_ids[batch_idx]
+            if hasattr(traj_id, 'item'):
+                traj_id = traj_id.item()
+            elif isinstance(traj_id, np.ndarray):
+                traj_id = str(traj_id.flat[0]) if traj_id.size > 0 else str(traj_id)
+            traj_id = str(traj_id)
             
-            # Extract base group and player ID
-            if isinstance(traj_id, str) and "_p" in traj_id:
-                parts = traj_id.split("_p")
-                base_group = parts[0]
-                player_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+            # Parse player suffix: "0_1_123_p0" -> game_id="0_1_123", player_id=0
+            if "_p" in traj_id:
+                parts = traj_id.rsplit("_p", 1)
+                game_id = parts[0]
+                player_id = int(parts[1]) if parts[1].isdigit() else 0
             else:
-                base_group = str(traj_id)
+                # Orphaned trajectory - treat as its own single-player game
+                game_id = f"orphan_{batch_idx}"
                 player_id = 0
             
-            if base_group not in group_map:
-                group_map[base_group] = {}
-            group_map[base_group][player_id] = batch_idx
+            if game_id not in game_map:
+                game_map[game_id] = {}
+            game_map[game_id][player_id] = batch_idx
         
-        # Process each group
+        # STEP 2: For each game, extract turns and compute interleaved returns
+        # turn_position_data[turn_k] = list of dicts with batch_idx, return, start, end
+        turn_position_data = {}
         processed_indices = set()
-        for base_group, player_indices in group_map.items():
-            if len(player_indices) < 2:
-                # Single player or incomplete pair, use regular microstep
-                for player_id, batch_idx in player_indices.items():
-                    if batch_idx not in processed_indices:
-                        adv, _ = compute_microstep_return(
-                            token_level_rewards[batch_idx:batch_idx+1],
-                            turn_end_positions[batch_idx:batch_idx+1],
-                            gamma, lambd
-                        )
-                        advantages[batch_idx] = adv[0]
-                        processed_indices.add(batch_idx)
-                continue
-            
-            # Get player indices
-            p0_idx = player_indices.get(0)
-            p1_idx = player_indices.get(1)
-            
-            if p0_idx is None or p1_idx is None:
-                # Incomplete pair, process individually
-                for player_id, batch_idx in player_indices.items():
-                    if batch_idx not in processed_indices:
-                        adv, _ = compute_microstep_return(
-                            token_level_rewards[batch_idx:batch_idx+1],
-                            turn_end_positions[batch_idx:batch_idx+1],
-                            gamma, lambd
-                        )
-                        advantages[batch_idx] = adv[0]
-                        processed_indices.add(batch_idx)
-                continue
-            
-            # Interleave turns from both players
-            p0_turns = extract_turns(token_level_rewards[p0_idx], turn_end_positions[p0_idx])
-            p1_turns = extract_turns(token_level_rewards[p1_idx], turn_end_positions[p1_idx])
-            
-            # Compute interleaved returns
-            interleaved_rewards = []
-            turn_player_mapping = []  # Track which player owns each turn
-            
-            for turn_idx in range(max(len(p0_turns), len(p1_turns))):
-                if turn_idx < len(p0_turns):
-                    interleaved_rewards.append(p0_turns[turn_idx]['reward'])
-                    turn_player_mapping.append((0, turn_idx))
-                if turn_idx < len(p1_turns):
-                    interleaved_rewards.append(p1_turns[turn_idx]['reward'])
-                    turn_player_mapping.append((1, turn_idx))
-            
-            # Compute return-to-go over interleaved sequence
-            num_interleaved_turns = len(interleaved_rewards)
-            interleaved_returns = torch.zeros(num_interleaved_turns, device=token_level_rewards.device)
-            cumulative_return = 0.0
-            for idx in reversed(range(num_interleaved_turns)):
-                cumulative_return = interleaved_rewards[idx] + gamma * cumulative_return
-                interleaved_returns[idx] = cumulative_return
-            
-            # Broadcast returns back to tokens for each player
-            for interleaved_idx, (player_id, turn_idx) in enumerate(turn_player_mapping):
-                batch_idx = p0_idx if player_id == 0 else p1_idx
-                turn_info = p0_turns[turn_idx] if player_id == 0 else p1_turns[turn_idx]
-                start_idx = turn_info['start']
-                end_idx = turn_info['end']
-                advantages[batch_idx, start_idx:end_idx] = interleaved_returns[interleaved_idx]
-            
-            processed_indices.add(p0_idx)
-            processed_indices.add(p1_idx)
         
-        returns = advantages
-    return advantages, returns
+        for game_id, players in game_map.items():
+            # Extract turns for each player in this game
+            all_player_turns = {}
+            for player_id, batch_idx in players.items():
+                turns = extract_turns(token_level_rewards[batch_idx], turn_end_positions[batch_idx])
+                all_player_turns[player_id] = {'batch_idx': batch_idx, 'turns': turns}
+            
+            # Get max turns across players in this game
+            max_player_turns = max(len(p['turns']) for p in all_player_turns.values()) if all_player_turns else 0
+            
+            if max_player_turns == 0:
+                # No turns detected for this game - skip (advantages stay 0)
+                for player_id, batch_idx in players.items():
+                    processed_indices.add(batch_idx)  # Mark as processed (with 0 advantage)
+                continue
+            
+            # Build interleaved sequence: P0_turn0, P1_turn0, P0_turn1, P1_turn1, ...
+            interleaved = []
+            for turn_idx in range(max_player_turns):
+                for player_id in sorted(all_player_turns.keys()):
+                    player_data = all_player_turns[player_id]
+                    if turn_idx < len(player_data['turns']):
+                        interleaved.append((
+                            player_id, 
+                            turn_idx, 
+                            player_data['batch_idx'], 
+                            player_data['turns'][turn_idx]
+                        ))
+            
+            # Compute return-to-go for interleaved sequence
+            # R_k = r_k + gamma * r_{k+1} + gamma^2 * r_{k+2} + ...
+            rewards = []
+            for t in interleaved:
+                r = t[3]['reward']
+                rewards.append(r.item() if hasattr(r, 'item') else float(r))
+            
+            returns_list = []
+            cumulative = 0.0
+            for r in reversed(rewards):
+                cumulative = r + gamma * cumulative
+                returns_list.insert(0, cumulative)
+            
+            # Store by global turn position k
+            for global_k, (player_id, turn_idx, batch_idx, turn_info) in enumerate(interleaved):
+                if global_k not in turn_position_data:
+                    turn_position_data[global_k] = []
+                turn_position_data[global_k].append({
+                    'batch_idx': batch_idx,
+                    'return': returns_list[global_k],
+                    'start': turn_info['start'],
+                    'end': turn_info['end'],
+                })
+                processed_indices.add(batch_idx)
+        
+        # STEP 3: Normalize by turn position k across all games ("Ours" - Equation 10)
+        # A_k^g = (R_k^g - mean(R_k)) / std(R_k)
+        # If |R_k| == 1, cannot normalize → use raw return to preserve learning signal
+        
+        for turn_k, pos_data in turn_position_data.items():
+            returns_at_k = torch.tensor([d['return'] for d in pos_data], device=device, dtype=dtype)
+            
+            if len(returns_at_k) > 1:
+                # Multiple games have this turn position → can normalize
+                mean_k = returns_at_k.mean()
+                std_k = returns_at_k.std()
+                
+                if std_k > 1e-8:
+                    # Normal case: A_k^g = (R_k^g - mean(R_k)) / std(R_k)
+                    normalized_k = (returns_at_k - mean_k) / std_k
+                else:
+                    # All returns identical (std=0) → mean-center only (results in all zeros)
+                    normalized_k = returns_at_k - mean_k
+                
+                # Clamp to prevent extreme values
+                normalized_k = torch.clamp(normalized_k, min=-10.0, max=10.0)
+            else:
+                # Only 1 game has this turn position → cannot normalize
+                # Use raw return to preserve learning signal
+                normalized_k = torch.clamp(returns_at_k, min=-10.0, max=10.0)
+            
+            # Broadcast normalized returns to token level
+            for i, data_point in enumerate(pos_data):
+                batch_idx = data_point['batch_idx']
+                start = data_point['start']
+                end = min(data_point['end'], seq_len)
+                
+                if batch_idx < batch_size and start < seq_len and end <= seq_len:
+                    norm_val = normalized_k[i].item()
+                    if np.isfinite(norm_val):
+                        advantages[batch_idx, start:end] = norm_val
+        
+        # STEP 4: Final safety checks
+        if torch.isnan(advantages).any() or torch.isinf(advantages).any():
+            logger.error("[compute_cooperative_microstep_return] NaN/Inf in advantages! Replacing with zeros.")
+            advantages = torch.where(torch.isfinite(advantages), advantages, torch.zeros_like(advantages))
+        
+        # Log summary
+        num_turn_positions = len(turn_position_data)
+        sizes = [len(pos_data) for pos_data in turn_position_data.values()]
+        if sizes:
+            logger.debug(f"[compute_cooperative_microstep_return] {num_turn_positions} turn positions, "
+                        f"group sizes: min={min(sizes)}, max={max(sizes)}, "
+                        f"positions with >1 game: {sum(1 for s in sizes if s > 1)}")
+        
+        # Ensure contiguous memory
+        advantages = advantages.contiguous()
+        returns = advantages.clone()
+        
+        return advantages, returns
 
 
 def extract_turns(token_rewards: torch.Tensor, turn_end_mask: torch.Tensor):
@@ -643,14 +714,20 @@ def extract_turns(token_rewards: torch.Tensor, turn_end_mask: torch.Tensor):
         
     Returns:
         List of dicts with 'start', 'end', and 'reward' for each turn
+        Each dict: {'start': int, 'end': int, 'reward': scalar tensor}
     """
+    seq_len = len(token_rewards)
     turn_ends = torch.where(turn_end_mask)[0].cpu().numpy()
     turns = []
     prev_end = -1
     
     for turn_end in turn_ends:
         start_idx = prev_end + 1
-        end_idx = turn_end + 1
+        end_idx = min(turn_end + 1, seq_len)  # Ensure we don't exceed sequence length
+        
+        if start_idx >= seq_len or start_idx >= end_idx:
+            continue  # Skip invalid ranges
+            
         turn_reward = token_rewards[start_idx:end_idx].sum()
         turns.append({
             'start': start_idx,
@@ -1324,12 +1401,25 @@ def reward_postprocess_agentic(data: "DataProto", pipeline_config: AgenticConfig
 
     metrics = {"critic/reward_clip_frac": 0.0}
 
-    # Determine if we should use turn-level normalization (for microstep estimators)
-    use_turn_level_norm = pipeline_config.adv_estimator in ["microstep", "microstep_multiagent"]
+    # Determine if we should use turn-level normalization (for microstep_cooperative estimator)
+    use_turn_level_norm = pipeline_config.adv_estimator == "microstep_cooperative"
 
     # 1. normalize (identity/mean/mean_std/asym_clip/running)
+    # IMPORTANT: microstep_cooperative performs turn-position-wise normalization internally!
+    # Enforce separate_norm_for_selfplay=False for microstep_cooperative
+    if pipeline_config.adv_estimator == "microstep_cooperative":
+        if pipeline_config.reward_normalization.separate_norm_for_selfplay:
+            logger.warning(
+                "Forcing separate_norm_for_selfplay=False for microstep_cooperative. "
+                "This advantage estimator performs turn-position-wise normalization internally."
+            )
+        # Force to False regardless of config
+        use_separate_norm = False
+    else:
+        use_separate_norm = pipeline_config.reward_normalization.separate_norm_for_selfplay
+    
     # Check if we should normalize players separately in self-play mode
-    if pipeline_config.reward_normalization.separate_norm_for_selfplay:
+    if use_separate_norm:
         rewards = reward_normalize_by_player(
             data=data,
             rewards=rewards, 
@@ -1518,34 +1608,27 @@ def compute_advantage(
         advantages, returns = compute_reinforce_return(
             token_level_rewards=token_level_rewards, gamma=gamma, lambd=lambd
         )
-    elif adv_estimator == "microstep":
-        # Microstep return-to-go: aggregate rewards at turn level
+    elif adv_estimator == "microstep_cooperative":
+        # Multi-agent microstep for COOPERATIVE games (e.g., Hanabi): normalize per-player turns across games
+        # print("\n[COMPUTE_ADVANTAGE DEBUG] Using microstep_cooperative estimator (COOPERATIVE)")
         turn_end_positions = data.batch.get("turn_end_positions", None)
         if turn_end_positions is None:
-            # Fall back to REINFORCE if turn_end_positions not available
+            # print("[COMPUTE_ADVANTAGE DEBUG] No turn_end_positions found, falling back to REINFORCE")
             advantages, returns = compute_reinforce_return(
                 token_level_rewards=token_level_rewards, gamma=gamma, lambd=lambd
             )
         else:
-            # Use turn-level return computation
-            turn_end_positions = turn_end_positions[:, 1:]  # Align with response_mask dimensions
-            advantages, returns = compute_microstep_return(
-                token_level_rewards=token_level_rewards,
-                turn_end_positions=turn_end_positions,
-                gamma=gamma,
-                lambd=lambd,
-            )
-    elif adv_estimator == "microstep_multiagent":
-        # Multi-agent microstep: interleave player trajectories for cross-trajectory returns
-        turn_end_positions = data.batch.get("turn_end_positions", None)
-        if turn_end_positions is None:
-            # Fall back to REINFORCE if turn_end_positions not available
-            advantages, returns = compute_reinforce_return(
-                token_level_rewards=token_level_rewards, gamma=gamma, lambd=lambd
-            )
-        else:
-            turn_end_positions = turn_end_positions[:, 1:]  # Align with response_mask dimensions
-            advantages, returns = compute_multiagent_microstep_return(
+            # Align turn_end_positions with token_level_rewards shape
+            # token_level_rewards is already sliced to [:, 1:] in reward_postprocess_agentic
+            # turn_end_positions needs the same slice
+            if turn_end_positions.shape[1] != token_level_rewards.shape[1]:
+                turn_end_positions = turn_end_positions[:, 1:]  # Align with response_mask dimensions
+            
+            # Validate shapes match
+            assert turn_end_positions.shape == token_level_rewards.shape, \
+                f"Shape mismatch: turn_end_positions {turn_end_positions.shape} vs token_level_rewards {token_level_rewards.shape}"
+            
+            advantages, returns = compute_cooperative_microstep_return(
                 data=data,
                 token_level_rewards=token_level_rewards,
                 turn_end_positions=turn_end_positions,
@@ -1555,12 +1638,19 @@ def compute_advantage(
     else:
         raise NotImplementedError
 
+    # Validate that advantages shape matches response_mask
+    if advantages.shape != response_mask.shape:
+        raise ValueError(
+            f"Shape mismatch after advantage computation: "
+            f"advantages {advantages.shape} vs response_mask {response_mask.shape}"
+        )
+
     data.batch["raw_advantages"] = advantages
-    # 对advantages中所有不同的数值进行归一化
+    # Normalize all unique advantage values
     if advantage_norm:
         advantages = normalize_unique_values_by_player(advantages, data, mode=advantage_norm)
     if whiten_advantages:
-        # TODO whiten过程中是否要考虑response的长度？
+        # TODO: Should we consider response length during whitening?
         advantages = masked_whiten(values=advantages, mask=response_mask)
     advantages = advantages * response_mask
 

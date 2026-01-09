@@ -111,11 +111,11 @@ def get_masks_and_scores(
     # TODO: special tokens add to config
     assistant_turn_start_tokens = tokenizer.encode("<|im_start|>assistant\n")
     turn_start_token = assistant_turn_start_tokens[0]
-    turn_starts = torch.where(input_ids == turn_start_token, 1, 0)
-    turn_indicators = torch.cumsum(turn_starts, dim=-1)
+    turn_starts = torch.where(input_ids == turn_start_token, 1, 0)  # (batch_size, seq_len)
+    turn_indicators = torch.cumsum(turn_starts, dim=-1)  # (batch_size, seq_len)
     # import pdb; pdb.set_trace()
-    response_mask = (turn_indicators % 2 == 1) & (turn_indicators > 1)  # only learns all assistant turns
-    non_prompt_mask = turn_indicators > 2  # learns everything after system prompt + user prompts
+    response_mask = (turn_indicators % 2 == 1) & (turn_indicators > 1)  # (batch_size, seq_len) - only learns all assistant turns
+    non_prompt_mask = turn_indicators > 2  # (batch_size, seq_len) - learns everything after system prompt + user prompts
 
     # turn text: '<|im_start|>assistant\n<answer>Right</answer><|im_end|>'
     # Mask format: '<|im_start|>assistant\n<answer>Right</answer><|im_end|>'
@@ -128,11 +128,11 @@ def get_masks_and_scores(
         Assistant turns are at positions 3, 5, 7, ... (odd indices after system)
         """
         turn_indicator = idx * 2 + 3  # 0: pad. 1: system. 2+2n: user. 3+2n: assistant
-        turn_start_position = (input_ids == turn_start_token) & (turn_indicators == turn_indicator)
+        turn_start_position = (input_ids == turn_start_token) & (turn_indicators == turn_indicator)  # (batch_size, seq_len)
         batch_size, seq_len = input_ids.shape
         num_tokens = len(assistant_turn_start_tokens)
         turn_start_indices = turn_start_position.nonzero(as_tuple=True)
-        mask_matrix = torch.zeros((batch_size, seq_len), dtype=torch.bool, device=input_ids.device)
+        mask_matrix = torch.zeros((batch_size, seq_len), dtype=torch.bool, device=input_ids.device)  # (batch_size, seq_len)
         for batch_idx, start_idx in zip(turn_start_indices[0], turn_start_indices[1]):
             end_idx = start_idx + num_tokens
             if end_idx <= seq_len:
@@ -143,27 +143,36 @@ def get_masks_and_scores(
 
     # TODO: special tokens add to config
     reward_token = tokenizer.encode("<|im_end|>")[0]
-    score_tensor = torch.zeros_like(input_ids, dtype=torch.float32)
+    score_tensor = torch.zeros_like(input_ids, dtype=torch.float32)  # (batch_size, seq_len)
     
     # Track end position of each turn (important for turn-level return-to-go computation)
-    turn_end_positions = torch.zeros_like(input_ids, dtype=torch.bool)
+    turn_end_positions = torch.zeros_like(input_ids, dtype=torch.bool)  # (batch_size, seq_len)
     
     if use_turn_scores:
+        # print("\n[ENV_MANAGER DEBUG] use_turn_scores=True")
+        # print(f"[ENV_MANAGER DEBUG] Number of trajectories: {len(all_scores)}")
+        # print(f"[ENV_MANAGER DEBUG] Turns per trajectory: {[len(scores) for scores in all_scores]}")
         for idx, scores in enumerate(zip_longest(*all_scores, fillvalue=0)):
-            scores = torch.tensor(scores, dtype=torch.float32)
+            scores = torch.tensor(scores, dtype=torch.float32)  # (batch_size,)
             turn_indicator = idx * 2 + 3  # 0: pad. 1: system. 2+2n: user. 3+2n: assistant
-            reward_position = (input_ids == reward_token) & (turn_indicators == turn_indicator)
+            reward_position = (input_ids == reward_token) & (turn_indicators == turn_indicator)  # (batch_size, seq_len)
             # Set the last token of the rows where all positions are False to True
             reward_position[~reward_position.any(dim=-1), -1] = True
             # Record the end position of current turn
-            turn_end_positions = turn_end_positions | reward_position
-            score_tensor[reward_position] = scores
+            turn_end_positions = turn_end_positions | reward_position  # (batch_size, seq_len)
+            score_tensor[reward_position] = scores  # Broadcasting from (batch_size,) to selected positions
+            # print(f"[ENV_MANAGER DEBUG] Turn {idx}: rewards={scores.tolist()}, turn_indicator={turn_indicator}")
     else:
         scores = [sum(i) for i in all_scores]
         score_tensor[:, -1] = torch.tensor(scores, dtype=torch.float32)
         # In non-turn-scores mode, all turn end positions are at the final token of the sequence
         turn_end_positions[:, -1] = True
+        print("\n[ENV_MANAGER DEBUG] use_turn_scores=False")
+        print(f"[ENV_MANAGER DEBUG] Total episode rewards: {scores}")
 
+    # print(f"[ENV_MANAGER DEBUG] turn_end_positions shape: {turn_end_positions.shape}")
+    # print(f"[ENV_MANAGER DEBUG] turn_end_positions sum per traj: {turn_end_positions.sum(dim=1).tolist()}")
+    # print(f"[ENV_MANAGER DEBUG] score_tensor non-zero positions: {(score_tensor != 0).sum(dim=1).tolist()}")
     return non_prompt_mask, score_tensor, response_mask, turn_end_positions
 
 
@@ -248,8 +257,6 @@ class EnvManager:
             "max_len": 2048,
             "coef": 1,
         }
-
-        print(f"Length reward scale: {self.length_reward_scale}")  # For debugging
 
     def reset(self):
         entry = self.env_entry

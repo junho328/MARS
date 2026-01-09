@@ -17,18 +17,40 @@ logger = get_logger()
 
 @dataclass
 class MicrostepConfig:
-    """Configuration for microstep (turn-level) return-to-go computation."""
+    """Configuration for microstep_cooperative (turn-level cross-trajectory) return-to-go.
+    
+    This implements multi-agent self-play with turn-position-wise normalization:
+        - Interleaves both players' turns chronologically: [P0_T0, P1_T0, P0_T1, P1_T1, ...]
+        - Computes cross-trajectory returns where P0's turn t includes P1's future actions
+        - Applies TURN-POSITION-WISE normalization: normalize returns at each turn position across games
+        
+    Example (3 games, 4 turn positions):
+        Turn position 0: (10, 26, 42) → normalize using mean(10,26,42) and std(10,26,42)
+        Turn position 1: (9, 21, 33) → normalize using mean(9,21,33) and std(9,21,33)
+        Turn position 2: (7, 15, 23) → normalize using mean(7,15,23) and std(7,15,23)
+        Turn position 3: (4, 8, 12) → normalize using mean(4,8,12) and std(4,8,12)
+        
+    This differs from MARS which normalizes per-player:
+        Player 0: all P0 returns across games → normalize together
+        Player 1: all P1 returns across games → normalize together
+    
+    cross_trajectory must be True for this to work (enforced automatically).
+    """
     level: Literal["turn", "action", "token"] = field(
         default="turn",
         metadata={"help": "Granularity level for return computation: 'turn' (aggregate at turn boundaries), 'action' (per action), 'token' (per token)"}
     )
     cross_trajectory: bool = field(
-        default=False,
-        metadata={"help": "Enable cross-trajectory return propagation in multi-agent self-play (Player 1's turn t+1 affects Player 0's turn t)"}
+        default=True,
+        metadata={"help": "Enable cross-trajectory return propagation in multi-agent self-play. When True, Player 0's return at turn t includes Player 1's future rewards. Required for microstep_cooperative."}
     )
     aggregation_method: Literal["sum", "mean", "max"] = field(
         default="sum",
         metadata={"help": "Method to aggregate token-level rewards within each turn: 'sum' (add all), 'mean' (average), 'max' (maximum)"}
+    )
+    normalize_returns: bool = field(
+        default=True,
+        metadata={"help": "Whether to normalize returns after computation. For microstep_cooperative, this performs TURN-POSITION-WISE normalization across games."}
     )
 
 @dataclass
@@ -69,7 +91,7 @@ class EnvManagerConfig(WorkerConfig):
 
     def __post_init__(self):
         """
-        根据es config计算world_size
+        Calculate world_size based on environment config
         """
         if self.max_env_num_per_worker <= 0:
             self.max_env_num_per_worker = self.env_groups * self.group_size
@@ -174,12 +196,12 @@ class AgenticConfig(BaseConfig):
         },
     )
     advantage_clip: float = field(default=None, metadata={"help": "advantage_clip value"})
-    adv_estimator: Literal["gae", "reinforce", "grpo", "microstep", "microstep_multiagent"] = field(
-        default="gae", metadata={"help": "advantage estimator: gae (GAE), reinforce (REINFORCE), grpo (GRPO), microstep (turn-level), microstep_multiagent (cross-trajectory)"}
+    adv_estimator: Literal["gae", "reinforce", "grpo", "microstep_cooperative"] = field(
+        default="gae", metadata={"help": "advantage estimator: gae (GAE), reinforce (REINFORCE), grpo (GRPO), microstep_cooperative (turn-level cooperative multi-agent)"}
     )
     microstep_config: MicrostepConfig = field(
         default_factory=MicrostepConfig,
-        metadata={"help": "Configuration for microstep return computation (only used when adv_estimator='microstep' or 'microstep_multiagent')"}
+        metadata={"help": "Configuration for microstep return computation (only used when adv_estimator='microstep_cooperative')"}
     )
     reward_norm: Literal["batch", "group", "running", None] = field(
         default=None,
@@ -316,7 +338,7 @@ class AgenticConfig(BaseConfig):
                 self.critic.training_args.per_device_train_batch_size
                 * self.critic.training_args.gradient_accumulation_steps
         )
-        # 没有除dp_size，需要在分布式环境初始化后再除
+        # Not divided by dp_size yet, needs to be divided after distributed environment initialization
         self.actor_train.training_args.max_steps = max_steps * (
                 self.rollout_batch_size
                 * self.actor_infer.generating_args.num_return_sequences
