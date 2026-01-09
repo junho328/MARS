@@ -24,11 +24,10 @@ system_envs:
 
 track_with: wandb
 tracker_kwargs:
- api_key: 4f27a301fcc24e0267973277fc29e90b1c78064b
- project: mars-mini-hanabi-train
- name: mini_hanabi_train_${exp_name}
- notes: "Mini Hanabi self-play train with random partner"
- dir: /home/work/aipr-jhna/output/mars/exps/${exp_name}/output/logs
+ project: mars-hanabi-train
+ name: hanabi_train_${exp_name}
+ notes: "Hanabi self-play train"
+ dir: /ext_hdd/dematsunaga/output/mars/exps/${exp_name}/output/logs
 
 # track_with: tensorboard
 # tracker_kwargs:
