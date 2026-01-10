@@ -267,7 +267,7 @@ class EnvManager:
 
         # log first turn by the built-in opponent (if opponent goes first)
         if execute_results:
-            self._log_env_state(execute_results=execute_results, current_player=0)
+            self._log_env_state(execute_results=execute_results, current_player=execute_results[0]['current_player'])
 
         self.episode_id += 1
         return self.rollout_cache
@@ -556,7 +556,7 @@ class EnvManager:
         non_prompt_mask = torch.logical_and(non_prompt_mask, attention_mask)
         response_mask = torch.logical_and(response_mask, attention_mask)
         response_length = response_mask.sum(dim=-1).float().mean().item()
-        response_length_per_turn = [i["token_length"] for i in self.rollout_cache[history_key]]
+        response_length_per_turn = [i["token_length"] for i in self.rollout_cache[history_key] if "token_length" in i]
 
         input_ids = pad_to_length(
             input_ids, length=self.pipeline_config.sequence_length, pad_value=self.tokenizer.pad_token_id
@@ -724,9 +724,14 @@ class EnvManager:
         return mapped_actions, lose_for_wrong_format
 
     def _log_env_state(self, execute_results: Tuple[Dict], current_player: int, format_reward: float=0, env_input: Dict=None):
-        assert execute_results[0]['current_player'] == current_player, f"current_player: {current_player}, execute_results: {execute_results}"
+        # In multi-player games like Bridge, execute_results may start with a different player
+        # (e.g., opponent's response after the LLM's action), so we use the first result's player
+        if execute_results[0]['current_player'] is not None and execute_results[0]['current_player'] != current_player:
+            current_player = execute_results[0]['current_player']
         for idx, turn in enumerate(execute_results):
-            current_player = turn['current_player']
+            # Keep previous current_player if turn's current_player is None (game ended)
+            if turn['current_player'] is not None:
+                current_player = turn['current_player']
             # Update status
             self.env_entry["status"].step += 1
             self.env_entry["status"].num_actions += 1
@@ -851,7 +856,7 @@ class EnvManager:
                         messages[-1]["content"] += (
                             f"LEGAL ACTIONS:\n{', '.join(content['legal_actions'].values())}.\n\n"
                         )
-                    if len(content['actions']) > 0:
+                    if content.get('actions') and len(content['actions']) > 0:
                         messages[-1]["content"] += f"CHOSEN ACTION:\n{content['actions']}\n"
                 else:
                     messages[-1]["content"] += (

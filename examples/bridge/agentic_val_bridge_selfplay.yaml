@@ -15,20 +15,27 @@ hydra:
 
 exp_name: bridge_selfplay
 seed: 42
-logging_dir: /home/work/aipr-jhna/output/mars/exps/${exp_name}/output/logs
-output_dir: /home/work/aipr-jhna/output/mars/exps/${exp_name}/output
+logging_dir: /ext_hdd/nhkoh/MARS/output/mars/exps/${exp_name}/output/logs
+output_dir: /ext_hdd/nhkoh/MARS/output/mars/exps/${exp_name}/output
 
 # render_save_dir: ./runs/render
 system_envs:
   USE_MODELSCOPE: "1"
 
-track_with: wandb
-tracker_kwargs:
- api_key: 4f27a301fcc24e0267973277fc29e90b1c78064b
- project: mars-bridge-train
- name: bridge_train_${exp_name}
- notes: "Bridge self-play train with random opponent"
- dir: /home/work/aipr-jhna/output/mars/exps/${exp_name}/output/logs
+track_with: ~
+tracker_kwargs: ~
+
+# track_with: tensorboard
+# tracker_kwargs:
+#   log_dir: /ext_hdd/nhkoh/MARS/output/mars/exps/${exp_name}/output/tensorboard_logs
+
+# track_with: wandb
+# tracker_kwargs:
+#  api_key: 4f27a301fcc24e0267973277fc29e90b1c78064b
+#  project: mars-bridge-train
+#  name: bridge_train_${exp_name}
+#  notes: "Bridge self-play train with random opponent"
+#  dir: /ext_hdd/nhkoh/MARS/output/mars/exps/${exp_name}/output/logs
 
 # track_with: tensorboard
 # tracker_kwargs:
@@ -40,7 +47,7 @@ lora_alpha: 32
 lora_dropout: 0.0
 lora_bias: "none"
 
-num_gpus_per_node: 4
+num_gpus_per_node: 1
 
 max_steps: 50
 save_steps: 10
@@ -48,9 +55,9 @@ logging_steps: 1
 eval_steps: 5
 resume_from_checkpoint: false
 
-rollout_batch_size: 128
-val_batch_size: 1500
-sequence_length: 32768
+rollout_batch_size: 64
+val_batch_size: 500
+sequence_length: 8192
 
 # reward_clip: 10
 # advantage_clip: 4
@@ -66,7 +73,7 @@ kl_loss_coef: 0.20
 whiten_advantages: true
 entropy_loss_coef: 0
 
-pretrain: /home/work/aipr-jhna/huggingface_hub/Qwen3-4B
+pretrain: Qwen/Qwen3-1.7B
 
 actor_train:
   model_args:
@@ -85,8 +92,8 @@ actor_train:
     weight_decay: 0.05
     adam_beta1: 0.9
     adam_beta2: 0.95
-    per_device_train_batch_size: 2
-    gradient_accumulation_steps: 2
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 4
     warmup_steps: 10
   data_args:
     template: qwen3
@@ -104,7 +111,7 @@ actor_train:
   strategy_args:
     strategy_name: deepspeed_train
     strategy_config: ${deepspeed_zero3}
-  device_mapping: list(range(0,4))
+  device_mapping: list(range(0,1))
   infer_batch_size: 2
 
 actor_infer:
@@ -130,7 +137,7 @@ actor_infer:
       gpu_memory_utilization: 0.8
       block_size: 16
       load_format: auto
-  device_mapping: list(range(0,4))
+  device_mapping: list(range(0,1))
 
 reference:
   model_args:
@@ -143,7 +150,7 @@ reference:
   strategy_args:
     strategy_name: hf_infer
     strategy_config: ~
-  device_mapping: list(range(0,2))
+  device_mapping: list(range(0,1))
   infer_batch_size: 2
 
 enable_response_mask: True
@@ -175,18 +182,18 @@ custom_envs:
 
 train_env_manager:
   format_penalty: 0.05 # penalty for wrong format
-  max_env_num_per_worker: 64
-  env_groups: 64
+  max_env_num_per_worker: 32
+  env_groups: 32
   # under the same group, the env config and env seed are ensured to be equal
   group_size: 1
   tags: [ContractBridge]
-  n_groups: [64] # If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
+  n_groups: [32] # If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
 
 val_env_manager:
-  max_env_num_per_worker: 32
-  env_groups: 32
+  max_env_num_per_worker: 16
+  env_groups: 16
   group_size: 1
   tags: [
     ContractBridge
   ]
-  n_groups: [32] #
+  n_groups: [16] #

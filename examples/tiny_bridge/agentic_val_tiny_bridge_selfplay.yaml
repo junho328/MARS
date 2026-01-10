@@ -15,8 +15,8 @@ hydra:
 
 exp_name: "tiny_bridge_selfplay"
 seed: 42
-logging_dir: /home/work/aipr-jhna/output/mars/exps/${exp_name}/output/logs
-output_dir: /home/work/aipr-jhna/output/mars/exps/${exp_name}/output
+logging_dir: /ext_hdd2/nhkoh/mars_runs/${exp_name}/logs
+output_dir: /ext_hdd2/nhkoh/mars_runs/${exp_name}/output
 
 # render_save_dir: ./runs/render
 system_envs:
@@ -24,11 +24,10 @@ system_envs:
 
 track_with: wandb
 tracker_kwargs:
- api_key: 4f27a301fcc24e0267973277fc29e90b1c78064b
  project: mars-tiny-bridge-train
  name: tiny_bridge_train_${exp_name}
- notes: "Tiny Bridge self-play train with random partner"
- dir: /home/work/aipr-jhna/output/mars/exps/${exp_name}/output/logs
+ notes: "Tiny Bridge self-play train with random partner - Qwen3-4B"
+ dir: /ext_hdd2/nhkoh/mars_runs/${exp_name}/logs
 
 # track_with: tensorboard
 # tracker_kwargs:
@@ -40,7 +39,7 @@ lora_alpha: 32
 lora_dropout: 0.0
 lora_bias: "none"
 
-num_gpus_per_node: 4
+num_gpus_per_node: 1
 
 max_steps: 100
 save_steps: 10
@@ -66,7 +65,7 @@ kl_loss_coef: 0.20
 whiten_advantages: true
 entropy_loss_coef: 0
 
-pretrain: /home/work/aipr-jhna/huggingface_hub/Qwen3-4B
+pretrain: Qwen/Qwen3-4B
 
 actor_train:
   model_args:
@@ -104,7 +103,7 @@ actor_train:
   strategy_args:
     strategy_name: deepspeed_train
     strategy_config: ${deepspeed_zero3}
-  device_mapping: list(range(0,4))
+  device_mapping: "[0]"
   infer_batch_size: 2
 
 actor_infer:
@@ -130,7 +129,8 @@ actor_infer:
       gpu_memory_utilization: 0.3
       block_size: 16
       load_format: auto
-  device_mapping: list(range(0,4))
+      dtype: float16
+  device_mapping: "[0]"
 
 reference:
   model_args:
@@ -143,7 +143,7 @@ reference:
   strategy_args:
     strategy_name: hf_infer
     strategy_config: ~
-  device_mapping: list(range(0,4))
+  device_mapping: "[0]"
   infer_batch_size: 2
 
 enable_response_mask: True

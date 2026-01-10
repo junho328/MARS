@@ -188,12 +188,27 @@ class LogMonitorListener:
         self.node_ip_address = ray.util.get_node_ip_address()
         self.rank = get_driver_rank()
         self.world_size = get_driver_world_size()
-        self.log_monitor = LogMonitor(
-            node_ip_address=self.node_ip_address,
-            logs_dir=self.log_dir,
-            gcs_publisher=StdPublisher(),
-            is_proc_alive_fn=is_proc_alive,
-        )
+        
+        # Check Ray version for API compatibility
+        import inspect
+        log_monitor_sig = inspect.signature(RayLogMonitor.__init__)
+        if 'gcs_publisher' in log_monitor_sig.parameters:
+            # Older Ray versions use gcs_publisher
+            self.log_monitor = LogMonitor(
+                node_ip_address=self.node_ip_address,
+                logs_dir=self.log_dir,
+                gcs_publisher=StdPublisher(),
+                is_proc_alive_fn=is_proc_alive,
+            )
+        else:
+            # Ray 2.53+ uses gcs_client
+            gcs_client = ray._raylet.GcsClient(address=ray.get_runtime_context().gcs_address)
+            self.log_monitor = LogMonitor(
+                node_ip_address=self.node_ip_address,
+                logs_dir=self.log_dir,
+                gcs_client=gcs_client,
+                is_proc_alive_fn=is_proc_alive,
+            )
         monitor_logger.setLevel(logging.CRITICAL)
 
         self.exception_monitor = None

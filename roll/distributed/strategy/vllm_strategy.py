@@ -341,6 +341,9 @@ class VllmStrategy(InferenceStrategy):
         self.model.broadcast_bucket(src_pp_rank, meta_infos, bucket_size)
 
     def update_parameter(self, parameter_name, weight, ranks_in_worker):
+        # Convert bf16 to fp16 for vLLM compatibility (vLLM v1 serialization doesn't support bf16)
+        if hasattr(weight, 'dtype') and weight.dtype == torch.bfloat16:
+            weight = weight.to(torch.float16)
         self.model.update_parameter(parameter_name, weight, ranks_in_worker)
 
     def update_parameter_in_bucket(self, meta_infos, buffer, ranks_in_worker):
