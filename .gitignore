@@ -167,3 +167,5 @@ cython_debug/
 log
 # examples
 runs/wandb/
+wandb/
+output/
